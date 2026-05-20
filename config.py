@@ -9,6 +9,7 @@ else:
 STORAGE_DIR = os.path.join(BASE_DIR, 'storage')
 LOG_DIR = os.path.join(BASE_DIR, 'logs')
 BROWSERS_DIR = os.path.join(BASE_DIR, 'browsers')
+SETTINGS_PATH = os.path.join(BASE_DIR, 'settings.json')
 
 STORAGE_STATE_PATH = os.path.join(STORAGE_DIR, 'state.json')
 
@@ -28,6 +29,7 @@ COOKIE_RULES = [
     ('wutonggateway.sto.cn', 'spf_sid', lambda n, v: f'{n}={v}'),
     ('wutonggateway.sto.cn', 'stoToken', lambda n, v: f'{n}={v}'),
     ('wutonggateway.sto.cn', 'sid_cfo', lambda n, v: f'{n}={v}'),
+    ('wutonggateway.sto.cn', 'WD_SESSION', lambda n, v: f'{n}={v}'),
 ]
 
 COMBO_RULES = [
@@ -39,7 +41,7 @@ COMBO_RULES = [
     {
         'domain': 'wutonggateway.sto.cn',
         'names': ['sid_cfo', 'WD_SESSION', 'TSID'],
-        'format': lambda cookies: 'CFO_DOWNLOAD' + ''.join(f'{c["name"]}={c["value"]}' for c in cookies),
+        'format': lambda cookies: 'CFO_DOWNLOAD' + ';'.join(f'{c["name"]}={c["value"]}' for c in cookies),
     },
 ]
 
@@ -50,5 +52,5 @@ REPORT_URLS = [
 
 SSO_URL = 'https://page.sto.cn/sto-base-service/sto-sso-web/#/main?autoLogin=true&systemCode=SITE_KEEPER&returnUrl=/index'
 
-COLLECT_INTERVAL_MINUTES = 1
-HEARTBEAT_INTERVAL_MINUTES = 3
+COLLECT_INTERVAL_MINUTES = 360
+HEARTBEAT_INTERVAL_MINUTES = 20

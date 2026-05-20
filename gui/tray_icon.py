@@ -29,6 +29,12 @@ class TrayIcon(QSystemTrayIcon):
 
         menu.addSeparator()
 
+        self._pause_action = QAction('暂停', menu)
+        self._pause_action.triggered.connect(self._toggle_pause)
+        menu.addAction(self._pause_action)
+
+        menu.addSeparator()
+
         quit_action = QAction('退出', menu)
         quit_action.triggered.connect(self._quit)
         menu.addAction(quit_action)
@@ -45,6 +51,14 @@ class TrayIcon(QSystemTrayIcon):
     def _on_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self._show_window()
+
+    def _toggle_pause(self):
+        if self._pause_action.text() == '暂停':
+            self._worker.pause()
+            self._pause_action.setText('恢复')
+        else:
+            self._worker.resume()
+            self._pause_action.setText('暂停')
 
     def _quit(self):
         self._worker.stop()

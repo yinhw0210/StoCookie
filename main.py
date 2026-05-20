@@ -15,7 +15,7 @@ class QtLogSink:
         self._signal = signal
 
     def write(self, message):
-        self._signal.emit(message.strip())
+        self._signal.emit(message.strip(), 'general')
 
 
 def main():
@@ -24,8 +24,8 @@ def main():
     logger.remove()
     logger.add(sys.stderr, level='INFO')
     logger.add(
-        os.path.join(LOG_DIR, 'stocookie.log'),
-        rotation='10 MB', retention='7 days', level='DEBUG',
+        os.path.join(LOG_DIR, 'stocookie-{time:YYYY-MM-DD}.log'),
+        rotation='00:00', retention='30 days', level='DEBUG',
     )
 
     app = QApplication(sys.argv)
