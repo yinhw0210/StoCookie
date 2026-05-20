@@ -55,11 +55,37 @@ COMBO_RULES = [
 ]
 
 REPORT_URLS = [
-    'https://slinghang.cn/s/v1/normandy/api/controller/cust/netManager/settingCookie',
+    # slinghang 暂时不启用，后续需要时再放开。
+    # 'https://slinghang.cn/s/v1/normandy/api/controller/cust/netManager/settingCookie',
     'https://lysto.com.cn/s/v1/normandy/api/controller/cust/netManager/settingCookie',
 ]
 
-SSO_URL = 'https://page.sto.cn/sto-base-service/sto-sso-web/#/main?autoLogin=true&systemCode=SITE_KEEPER&returnUrl=/index'
+WANGDIAN_MAP_AREA_DETAIL_URL_MARKER = 'wangdian.sto.cn/order/collectMap/query/detail/mapAreaDetail'
+WANGDIAN_TRIGGER_INTERVAL_SECONDS = 5 * 60
+
+LOGIN_ENTRY_URL = 'https://wangdian.sto.cn'
+SSO_URL = LOGIN_ENTRY_URL
+WANGDIAN_INDEX_URL = 'https://wangdian.sto.cn/index'
+
+ROLE_PAGE_SELECTOR = '.accountCorrelation_main_window'
+ROLE_ITEM_SELECTOR = '.next-list-item.list_wrap_item'
+ROLE_ENTRY_BUTTON_SELECTOR = '.entrybtn'
+SAFETY_QUICK_LOGIN_SELECTOR = 'button.ant-btn-primary:has-text("快速登录")'
+
+AUTH_URL_MARKERS = (
+    'sto-sso-web',
+    'safety-tsportal.sto.cn',
+    'login.dingtalk.com',
+    '/app_login',
+)
+
+
+def is_auth_url(url: str) -> bool:
+    return any(marker in url for marker in AUTH_URL_MARKERS)
+
+
+def is_logged_in_url(url: str) -> bool:
+    return url.startswith(WANGDIAN_INDEX_URL) or url.rstrip('/') == LOGIN_ENTRY_URL
 
 COLLECT_INTERVAL_MINUTES = 360
 HEARTBEAT_INTERVAL_MINUTES = 20

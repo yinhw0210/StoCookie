@@ -1,13 +1,14 @@
 # StoCookie
 
-STO 内部系统 Cookie 自动采集工具。通过钉钉 SSO 登录后，定时采集各业务系统 Cookie 并上报到 Normandy 后台，同时心跳保活维持 Session 有效。
+STO 内部系统 Cookie 自动采集工具。通过网点入口自动完成钉钉/虎盾/多角色登录后，定时采集各业务系统 Cookie 并上报到 Normandy 后台，同时心跳保活维持 Session 有效。
 
 ## 工作原理
 
-1. **登录**：打开 SSO 页面 → 钉钉 iframe 内点击头像授权 → 桌面自动化点击钉钉客户端确认弹窗
-2. **采集**：每 1 分钟访问各业务页面，提取指定 Cookie
-3. **上报**：将 Cookie 按规则格式化后 POST 到 Normandy API
-4. **保活**：每 3 分钟访问业务页面维持 Session，过期自动重新登录
+1. **登录**：打开 `https://wangdian.sto.cn` → 按需处理钉钉/虎盾/多角色 → 保留主登录页
+2. **采集**：使用独立新标签页访问业务页面，提取指定 Cookie，完成后关闭采集页
+3. **上报**：将 Cookie 按规则格式化后 GET 到 Normandy API
+4. **触发**：监听网点 `mapAreaDetail` 接口，5 分钟限流上报一次 `KFSD=...`
+5. **保活**：定时检查 Session，过期自动重新登录
 
 ## 平台支持
 
@@ -81,11 +82,12 @@ iscc installer.iss
 
 编辑 `config.py`：
 
-- `SSO_URL`：SSO 登录地址
+- `SSO_URL`：登录入口地址（当前为 `https://wangdian.sto.cn`）
+- `WANGDIAN_MAP_AREA_DETAIL_URL_MARKER`：触发 `KFSD` 上报的网点接口匹配标记
 - `HEARTBEAT_URLS`：心跳保活的业务页面列表
 - `COOKIE_RULES`：Cookie 采集规则（域名、Cookie 名、格式化函数）
 - `COMBO_RULES`：组合 Cookie 规则
-- `REPORT_URLS`：Cookie 上报接口地址
+- `REPORT_URLS`：Cookie 上报接口地址（`slinghang` 暂时关闭，仅启用 `lysto`）
 - `COLLECT_INTERVAL_MINUTES`：采集间隔（默认 1 分钟）
 - `HEARTBEAT_INTERVAL_MINUTES`：心跳间隔（默认 3 分钟）
 

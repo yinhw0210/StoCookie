@@ -2,7 +2,16 @@ import asyncio
 from playwright.async_api import Page, Frame
 from loguru import logger
 
-from config import SSO_URL
+from config import (
+    LOGIN_ENTRY_URL,
+    ROLE_ENTRY_BUTTON_SELECTOR,
+    ROLE_ITEM_SELECTOR,
+    ROLE_PAGE_SELECTOR,
+    SAFETY_QUICK_LOGIN_SELECTOR,
+    SSO_URL,
+    WANGDIAN_INDEX_URL,
+    is_logged_in_url,
+)
 from desktop_automation import click_dingtalk_confirm
 
 
@@ -127,20 +136,118 @@ async def _finish_confirm_task(task: asyncio.Task) -> None:
         logger.debug(f'桌面确认任务取消时结束: {e}')
 
 
+async def select_first_role_if_present(page: Page) -> bool:
+    """如果出现多角色选择页，选择第一个角色并点击进入系统。"""
+    role_page = page.locator(ROLE_PAGE_SELECTOR)
+    role_items = page.locator(ROLE_ITEM_SELECTOR)
+
+    has_role_page = False
+    try:
+        has_role_page = await role_page.first.is_visible(timeout=1000)
+    except Exception:
+        pass
+
+    has_role_item = False
+    try:
+        has_role_item = await role_items.first.is_visible(timeout=1000)
+    except Exception:
+        pass
+
+    if not has_role_page and not has_role_item:
+        return False
+
+    try:
+        await role_items.first.wait_for(state='visible', timeout=5000)
+    except Exception:
+        raise RuntimeError('检测到角色选择页，但未找到可选角色')
+
+    await role_items.first.click()
+    logger.info('已选择第一个关联工号')
+
+    entry_button = page.locator(ROLE_ENTRY_BUTTON_SELECTOR)
+    if not await entry_button.first.is_visible(timeout=5000):
+        raise RuntimeError('未找到「进入系统」按钮')
+
+    await entry_button.first.click()
+    logger.info('已点击「进入系统」')
+    await page.wait_for_url(
+        lambda url: is_logged_in_url(url),
+        timeout=30000,
+    )
+    return True
+
+
+async def click_safety_quick_login_if_present(page: Page) -> bool:
+    """如果出现虎盾零信任快速登录页，点击快速登录继续。"""
+    if 'safety-tsportal.sto.cn' not in page.url:
+        return False
+
+    quick_login = page.locator(SAFETY_QUICK_LOGIN_SELECTOR)
+    try:
+        if not await quick_login.first.is_visible(timeout=3000):
+            return False
+    except Exception:
+        return False
+
+    await quick_login.first.click()
+    logger.info('已点击虎盾「快速登录」')
+    return True
+
+
+async def wait_for_wangdian_entry_or_role(page: Page, timeout_ms: int = 60000) -> None:
+    """等待进入网点系统；必要时处理虎盾快速登录和角色选择页。"""
+    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
+    while asyncio.get_running_loop().time() < deadline:
+        if is_logged_in_url(page.url):
+            logger.info(f'已进入网点系统: {page.url}')
+            return
+
+        if await click_safety_quick_login_if_present(page):
+            await page.wait_for_timeout(1000)
+            continue
+
+        if await select_first_role_if_present(page):
+            if is_logged_in_url(page.url):
+                logger.info(f'选择角色后已进入网点系统: {page.url}')
+                return
+
+        await page.wait_for_timeout(1000)
+
+    logger.error(f'等待进入网点系统超时，当前 URL: {page.url}')
+    try:
+        content = await page.locator('body').inner_text(timeout=3000)
+        logger.error(f'当前页面内容: {content[:500]}')
+    except Exception:
+        pass
+    raise RuntimeError(f'登录未完成，未进入 {LOGIN_ENTRY_URL} 或 {WANGDIAN_INDEX_URL}')
+
+
+wait_for_wangdian_index_or_role = wait_for_wangdian_entry_or_role
+
+
 async def login_via_dingtalk(page: Page) -> bool:
     """
     完整登录流程：
-    1. 打开 SSO 页面
+    1. 打开网点系统入口
     2. 定位钉钉 iframe
     3. 关闭 Cookie 弹窗（iframe 内）
     4. 点击用户头像
     5. 点击「立即登录」
     6. 处理授权同意（如有）
-    7. 等待页面跳转
+    7. 等待进入网点首页，如出现虎盾或角色选择则自动处理
     """
     logger.info('开始钉钉登录...')
     await page.goto(SSO_URL)
     await page.wait_for_timeout(3000)
+
+    if is_logged_in_url(page.url):
+        logger.info(f'网点系统入口未跳转认证页，已登录: {page.url}')
+        return True
+
+    if await click_safety_quick_login_if_present(page):
+        await wait_for_wangdian_entry_or_role(page)
+        logger.info('钉钉登录成功')
+        return True
 
     # Step 1: 定位钉钉 iframe
     dd_frame = await _get_dingtalk_frame(page)
@@ -160,22 +267,8 @@ async def login_via_dingtalk(page: Page) -> bool:
         # Step 5: 处理授权同意页面
         await _click_consent(dd_frame)
 
-        # Step 6: 等待页面跳转（登录成功）
-        try:
-            await page.wait_for_url(
-                lambda url: 'sto-sso-web' not in url,
-                timeout=40000
-            )
-        except Exception as e:
-            logger.error(f'登录跳转超时: {e}')
-            # 打印当前状态帮助调试
-            logger.error(f'当前 URL: {page.url}')
-            try:
-                content = await dd_frame.text_content('body')
-                logger.error(f'iframe 内容: {content[:500]}')
-            except Exception:
-                pass
-            raise
+        # Step 6: 等待进入系统首页；虎盾和多角色账号会自动处理
+        await wait_for_wangdian_entry_or_role(page)
     except Exception as e:
         logger.debug(f'钉钉登录流程中断: {e}')
         raise

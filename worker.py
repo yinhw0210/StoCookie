@@ -17,11 +17,15 @@ from config import (
     SSO_URL,
     STORAGE_DIR,
     STORAGE_STATE_PATH,
+    WANGDIAN_MAP_AREA_DETAIL_URL_MARKER,
+    WANGDIAN_TRIGGER_INTERVAL_SECONDS,
+    is_auth_url,
+    is_logged_in_url,
 )
-from cookie_collector import collect_cookies
+from cookie_collector import build_wangdian_kfsd_payload, collect_cookies, visit_cookie_seed_pages
 from cookie_reporter import report_cookies
 from heartbeat import heartbeat
-from login import login_via_dingtalk
+from login import login_via_dingtalk, wait_for_wangdian_entry_or_role
 
 COOKIE_DOMAINS = ['finance-mng', 'market-cod', 'finance-fundmanage', 'wutonggateway', 'wangdian']
 
@@ -50,6 +54,9 @@ class BackgroundWorker(threading.Thread):
         self._stop_event = threading.Event()
         self._paused = False
         self._loop = None
+        self._login_page = None
+        self._last_wangdian_trigger = 0.0
+        self._response_listener_registered = False
 
         settings = _load_settings()
         self._collect_interval = settings.get('collect_interval', COLLECT_INTERVAL_MINUTES)
@@ -94,14 +101,15 @@ class BackgroundWorker(threading.Thread):
                 self._emit_log('无已有 Session，创建新 context', 'login')
                 context = await browser.new_context()
 
-            need_login = await self._check_session(context)
-            if need_login:
-                await self._do_login(context)
-            else:
-                self._emit_status({'login': '已登录'})
-                self._emit_log('Session 有效，跳过登录', 'login')
+            self._register_wangdian_trigger(context)
 
-            await self._do_collect(context)
+            login_ok = await self._ensure_logged_in(context, 'startup')
+            if login_ok:
+                self._emit_status({'sync': '等待同步'})
+                self._emit_log('启动 SSO 校验完成，等待手动或定时 Cookie 同步', 'report')
+            else:
+                self._emit_status({'sync': '等待登录'})
+                self._emit_log('启动登录未完成，跳过首次 Cookie 同步', 'report')
 
             last_collect = time.time()
             last_heartbeat = time.time()
@@ -150,19 +158,34 @@ class BackgroundWorker(threading.Thread):
     async def _check_session(self, context) -> bool:
         page = await context.new_page()
         try:
+            self._emit_log(f'访问登录入口检查 Session: {SSO_URL}', 'login')
             await page.goto(SSO_URL, wait_until='domcontentloaded', timeout=20000)
-            # SSO_URL 本身含 sto-sso-web，如果 Session 有效会跳转走
-            # 等待可能的跳转
-            try:
-                await page.wait_for_url(
-                    lambda url: 'sto-sso-web' not in url,
-                    timeout=10000,
-                )
-                self._emit_log(f'Session 有效，已跳转到: {page.url}', 'login')
+            await page.wait_for_timeout(3000)
+            self._emit_log(f'登录入口检查完成，当前 URL: {page.url}', 'login')
+
+            if is_logged_in_url(page.url):
+                self._emit_log(f'Session 有效，网点入口未跳转认证页: {page.url}', 'login')
                 return False
-            except Exception:
-                # 超时未跳转，说明停留在登录页
+
+            if is_auth_url(page.url):
+                self._emit_log(f'Session 未完成，网点入口已跳转认证页: {page.url}', 'login')
                 return True
+
+            try:
+                await wait_for_wangdian_entry_or_role(page, timeout_ms=30000)
+            except Exception as e:
+                if is_auth_url(page.url):
+                    self._emit_log(f'Session 未完成，仍在认证页: {page.url}', 'login')
+                else:
+                    self._emit_log(f'Session 未完成，未进入网点系统: {page.url} ({e})', 'login')
+                return True
+
+            if is_logged_in_url(page.url):
+                self._emit_log(f'Session 有效，已进入网点系统: {page.url}', 'login')
+                return False
+
+            self._emit_log(f'Session 未完成，未进入网点系统: {page.url}', 'login')
+            return True
         except Exception as e:
             self._emit_log(f'Session 检测失败: {e}', 'login')
             return True
@@ -177,6 +200,7 @@ class BackgroundWorker(threading.Thread):
             try:
                 await login_via_dingtalk(page)
                 await context.storage_state(path=STORAGE_STATE_PATH)
+                await self._replace_login_page(page)
                 now = datetime.now().strftime('%H:%M:%S')
                 self._emit_status({'login': f'已登录 ({now})', 'login_time': now})
                 self._emit_log('登录成功', 'login')
@@ -189,13 +213,111 @@ class BackgroundWorker(threading.Thread):
                     self._emit_status({'login': f'登录失败 (已重试3次)'})
                     self._emit_log(f'登录失败，已重试3次: {e}', 'login')
             finally:
-                await page.close()
+                if page is not self._login_page:
+                    await page.close()
         return False
 
-    async def _do_collect(self, context):
+    async def _replace_login_page(self, page):
+        old_page = self._login_page
+        self._login_page = page
+        if old_page and old_page is not page:
+            try:
+                await old_page.close()
+            except Exception:
+                pass
+
+    def _register_wangdian_trigger(self, context):
+        if self._response_listener_registered:
+            return
+        context.on('response', lambda response: self._schedule_wangdian_trigger(context, response))
+        self._response_listener_registered = True
+
+    def _schedule_wangdian_trigger(self, context, response):
+        if WANGDIAN_MAP_AREA_DETAIL_URL_MARKER not in response.url:
+            return
+        if not self._loop or self._loop.is_closed():
+            return
+        self._loop.create_task(self._handle_wangdian_trigger(context, response.url))
+
+    async def _handle_wangdian_trigger(self, context, url: str):
+        now = time.time()
+        elapsed = now - self._last_wangdian_trigger
+        if elapsed < WANGDIAN_TRIGGER_INTERVAL_SECONDS:
+            remain = int(WANGDIAN_TRIGGER_INTERVAL_SECONDS - elapsed)
+            self._emit_log(f'mapAreaDetail 触发但仍在限流窗口，剩余{remain}秒，忽略: {url}', 'report')
+            return
+
+        self._last_wangdian_trigger = now
+        try:
+            self._emit_log(f'mapAreaDetail 触发 KFSD 上报: {url}', 'report')
+            all_cookies = await context.cookies('https://wangdian.sto.cn')
+            self._emit_log(f'mapAreaDetail 读取 wangdian Cookie 数: {len(all_cookies)}', 'report')
+            payload = build_wangdian_kfsd_payload(all_cookies)
+            if not payload:
+                self._emit_log('mapAreaDetail 触发但未找到 wangdian Cookie', 'report')
+                return
+
+            self._emit_log(f'mapAreaDetail 生成 KFSD payload: {payload[:80]}...', 'report')
+            reports = await report_cookies([payload])
+            total_success = sum(1 for entry in reports for r in entry['results'] if r['ok'])
+            total_fail = sum(1 for entry in reports for r in entry['results'] if not r['ok'])
+            for entry in reports:
+                results_str = ' / '.join(
+                    f'{r["url"]} ✓' if r['ok'] else f'{r["url"]} ✗({r["error"]})'
+                    for r in entry['results']
+                )
+                self._emit_log(f'mapAreaDetail KFSD 明细: {entry["cookie"]}... → {results_str}', 'report')
+            self._emit_log(
+                f'mapAreaDetail 触发 KFSD 上报完成: 成功{total_success}/失败{total_fail} ({url})',
+                'report',
+            )
+        except Exception as e:
+            self._emit_log(f'mapAreaDetail 触发 KFSD 上报异常: {e}', 'report')
+
+    async def _ensure_logged_in(self, context, reason: str) -> bool:
+        self._emit_log(f'执行 SSO 前置校验: {reason}', 'login')
+        need_login = await self._check_session(context)
+        if not need_login:
+            self._emit_status({'login': '已登录'})
+            self._emit_log('Session 有效，允许继续 Cookie 流程', 'login')
+            return True
+
+        self._emit_log('Session 无效或未登录，开始单点登录流程', 'login')
+        login_ok = await self._do_login(context)
+        if not login_ok:
+            self._emit_status({'login': '登录失败', 'sync': '等待登录'})
+            self._emit_log('单点登录未完成，禁止访问业务页和上报 Cookie', 'login')
+            return False
+        return True
+
+    async def _do_collect(self, context, sso_checked: bool = False):
         self._emit_status({'sync': '同步中...'})
         try:
+            if not sso_checked:
+                login_ok = await self._ensure_logged_in(context, 'collect')
+                if not login_ok:
+                    self._emit_status({'sync': '等待登录'})
+                    self._emit_log('登录未完成，跳过本轮 Cookie 同步', 'report')
+                    return
+
+            seed_results = await visit_cookie_seed_pages(context)
+            seed_success = sum(1 for r in seed_results if r['ok'])
+            seed_fail = len(seed_results) - seed_success
+            self._emit_log(
+                f'种子页面访问完成: 成功{seed_success}/失败{seed_fail}，继续采集已有 Cookie',
+                'report',
+            )
+            for result in seed_results:
+                if result['ok']:
+                    self._emit_log(f'种子页成功: {result["url"]} -> {result["final_url"]}', 'report')
+                else:
+                    self._emit_log(
+                        f'种子页跳过: {result["url"]} -> {result["reason"] or "未知原因"}',
+                        'report',
+                    )
+
             payloads = await collect_cookies(context)
+            self._emit_log(f'Cookie payload 生成完成: {len(payloads)} 条', 'report')
 
             # 发送 Cookie 状态
             all_cookies = await context.cookies()
@@ -203,20 +325,8 @@ class BackgroundWorker(threading.Thread):
             for d in COOKIE_DOMAINS:
                 cookie_status[d] = any(d in c.get('domain', '') for c in all_cookies)
             self._emit_status({'cookie_status': cookie_status})
-
-            # 0 条 Cookie 时主动检查 Session
-            if not payloads:
-                self._emit_log('采集到 0 条 Cookie，检查 Session 状态...', 'report')
-                need_login = await self._check_session(context)
-                if need_login:
-                    login_ok = await self._do_login(context)
-                    if login_ok:
-                        payloads = await collect_cookies(context)
-                        all_cookies = await context.cookies()
-                        cookie_status = {d: any(d in c.get('domain', '') for c in all_cookies) for d in COOKIE_DOMAINS}
-                        self._emit_status({'cookie_status': cookie_status})
-                else:
-                    self._emit_log('Session 有效但无 Cookie，可能业务页面未正常加载', 'report')
+            status_text = ' | '.join(f'{d}={"有" if ok else "无"}' for d, ok in cookie_status.items())
+            self._emit_log(f'Cookie 域名状态: {status_text}', 'report')
 
             if not payloads:
                 self._emit_status({'sync': '无 Cookie 可上报'})
@@ -254,6 +364,12 @@ class BackgroundWorker(threading.Thread):
     async def _do_heartbeat(self, context) -> bool:
         self._emit_status({'heartbeat': '检测中...'})
         try:
+            need_login = await self._check_session(context)
+            if need_login:
+                self._emit_status({'heartbeat': 'Session 过期'})
+                self._emit_log('心跳前置检测: Session 未完成，跳过业务页保活', 'heartbeat')
+                return False
+
             alive = await heartbeat(context)
             if alive:
                 self._emit_status({'heartbeat': '正常'})
