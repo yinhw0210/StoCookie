@@ -1,0 +1,5 @@
+playwright==1.49.1
+apscheduler==3.10.4
+httpx==0.28.1
+loguru==0.7.3
+pywinauto==0.6.8; sys_platform == "win32"

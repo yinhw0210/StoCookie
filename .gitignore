@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+logs/
+*.log
+
+# Storage state (contains session tokens)
+storage/
+
+# Screenshots (debug artifacts)
+screenshot_*.png
+
+# Explore/test scripts (debug artifacts)
+explore_*.py
+explore_*.txt
+explore_*.applescript
+test_*.py
+test_*.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Distribution
+dist/
+build/
+*.egg-info/
