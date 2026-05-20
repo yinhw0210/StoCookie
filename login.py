@@ -108,6 +108,25 @@ async def _click_consent(frame: Frame) -> None:
         logger.debug('未出现授权同意页面')
 
 
+async def _finish_confirm_task(task: asyncio.Task) -> None:
+    if task.done():
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.debug(f'桌面确认任务已结束: {e}')
+        return
+
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.debug(f'桌面确认任务取消时结束: {e}')
+
+
 async def login_via_dingtalk(page: Page) -> bool:
     """
     完整登录流程：
@@ -130,36 +149,38 @@ async def login_via_dingtalk(page: Page) -> bool:
     # Step 2: 关闭 Cookie 弹窗
     await _dismiss_cookie_dialog(dd_frame)
 
-    # Step 3: 点击用户头像
-    await _click_avatar(dd_frame)
-
-    # Step 4: 点击「立即登录」或等待钉钉客户端确认
-    await _click_confirm_login(dd_frame)
-
-    # Step 5: 同时启动桌面自动化（钉钉客户端可能弹确认框）
+    # Step 3: 先启动桌面自动化，再点击头像触发钉钉客户端确认弹窗
     confirm_task = asyncio.create_task(click_dingtalk_confirm(timeout=30))
-
-    # Step 6: 处理授权同意页面
-    await _click_consent(dd_frame)
-
-    # Step 7: 等待页面跳转（登录成功）
     try:
-        await page.wait_for_url(
-            lambda url: 'sto-sso-web' not in url,
-            timeout=40000
-        )
-    except Exception as e:
-        confirm_task.cancel()
-        logger.error(f'登录跳转超时: {e}')
-        # 打印当前状态帮助调试
-        logger.error(f'当前 URL: {page.url}')
-        try:
-            content = await dd_frame.text_content('body')
-            logger.error(f'iframe 内容: {content[:500]}')
-        except Exception:
-            pass
-        raise
+        await _click_avatar(dd_frame)
 
-    confirm_task.cancel()
+        # Step 4: 点击「立即登录」或等待钉钉客户端确认
+        await _click_confirm_login(dd_frame)
+
+        # Step 5: 处理授权同意页面
+        await _click_consent(dd_frame)
+
+        # Step 6: 等待页面跳转（登录成功）
+        try:
+            await page.wait_for_url(
+                lambda url: 'sto-sso-web' not in url,
+                timeout=40000
+            )
+        except Exception as e:
+            logger.error(f'登录跳转超时: {e}')
+            # 打印当前状态帮助调试
+            logger.error(f'当前 URL: {page.url}')
+            try:
+                content = await dd_frame.text_content('body')
+                logger.error(f'iframe 内容: {content[:500]}')
+            except Exception:
+                pass
+            raise
+    except Exception as e:
+        logger.debug(f'钉钉登录流程中断: {e}')
+        raise
+    finally:
+        await _finish_confirm_task(confirm_task)
+
     logger.info('钉钉登录成功')
     return True

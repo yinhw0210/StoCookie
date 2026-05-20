@@ -14,9 +14,9 @@ STO 内部系统 Cookie 自动采集工具。通过钉钉 SSO 登录后，定时
 | 平台 | 登录 | 桌面自动化 |
 |------|------|-----------|
 | macOS | Playwright + AppleScript | System Events → AXPress |
-| Windows | Playwright + pywinauto | UIA → Button click |
+| Windows | Playwright + pywinauto | UIA Invoke/click_input → 坐标兜底 |
 
-> **Windows 注意**：钉钉确认弹窗的 UI 结构可能与 macOS 不同，需要在 Windows 上用 Inspect.exe 或 Accessibility Insights 工具实际抓取弹窗元素结构后调整 `desktop_automation.py` 中的选择器。
+> **Windows 注意**：钉钉确认弹窗可能是 WebView 结构。程序会在日志里输出疑似弹窗的 title、class、rect 和带名称的 UIA 控件摘要，便于继续用 Inspect.exe / Accessibility Insights 对照。
 
 ## 前置条件
 
@@ -28,7 +28,7 @@ STO 内部系统 Cookie 自动采集工具。通过钉钉 SSO 登录后，定时
 ### Windows
 1. 钉钉桌面客户端已登录
 2. 电源设置：从不休眠
-3. 需要用 Inspect.exe 确认钉钉弹窗的实际 UI 元素结构
+3. 如自动点击失败，用日志里的弹窗信息配合 Inspect.exe 确认实际 UI 元素结构
 4. 可能需要管理员权限运行
 
 ## 安装
