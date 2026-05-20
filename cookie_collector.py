@@ -1,10 +1,31 @@
 from loguru import logger
 from playwright.async_api import BrowserContext
 
-from config import COOKIE_RULES, COMBO_RULES
+from config import COOKIE_RULES, COMBO_RULES, COOKIE_SEED_URLS
+
+
+async def _visit_seed_pages(context: BrowserContext) -> None:
+    """访问各业务页面，确保浏览器产生对应域名的 Cookie"""
+    for url in COOKIE_SEED_URLS:
+        page = None
+        try:
+            page = await context.new_page()
+            await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+            await page.wait_for_timeout(2000)
+        except Exception as e:
+            logger.debug(f'访问种子页面失败 {url}: {e}')
+        finally:
+            if page:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
 
 
 async def collect_cookies(context: BrowserContext) -> list[str]:
+    # 先访问各业务页面，让浏览器产生 Cookie
+    await _visit_seed_pages(context)
+
     all_cookies = await context.cookies()
     payloads = []
 
@@ -31,5 +52,5 @@ async def collect_cookies(context: BrowserContext) -> list[str]:
     if wd_cookies:
         payloads.append('KFSD=' + ';'.join(f'{c["name"]}={c["value"]}' for c in wd_cookies))
 
-    logger.debug(f'采集到 {len(payloads)} 条 Cookie 数据')
+    logger.debug(f'采集到 {len(payloads)} 条 Cookie 数据 (总 Cookie 数: {len(all_cookies)})')
     return payloads

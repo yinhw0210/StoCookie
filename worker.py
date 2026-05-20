@@ -151,7 +151,18 @@ class BackgroundWorker(threading.Thread):
         page = await context.new_page()
         try:
             await page.goto(SSO_URL, wait_until='domcontentloaded', timeout=20000)
-            return 'sto-sso-web' in page.url
+            # SSO_URL 本身含 sto-sso-web，如果 Session 有效会跳转走
+            # 等待可能的跳转
+            try:
+                await page.wait_for_url(
+                    lambda url: 'sto-sso-web' not in url,
+                    timeout=10000,
+                )
+                self._emit_log(f'Session 有效，已跳转到: {page.url}', 'login')
+                return False
+            except Exception:
+                # 超时未跳转，说明停留在登录页
+                return True
         except Exception as e:
             self._emit_log(f'Session 检测失败: {e}', 'login')
             return True
@@ -169,7 +180,7 @@ class BackgroundWorker(threading.Thread):
                 now = datetime.now().strftime('%H:%M:%S')
                 self._emit_status({'login': f'已登录 ({now})', 'login_time': now})
                 self._emit_log('登录成功', 'login')
-                return
+                return True
             except Exception as e:
                 if attempt < 2:
                     self._emit_log(f'登录失败({attempt+1}/3)，30秒后重试: {e}', 'login')
@@ -179,6 +190,7 @@ class BackgroundWorker(threading.Thread):
                     self._emit_log(f'登录失败，已重试3次: {e}', 'login')
             finally:
                 await page.close()
+        return False
 
     async def _do_collect(self, context):
         self._emit_status({'sync': '同步中...'})
@@ -197,11 +209,14 @@ class BackgroundWorker(threading.Thread):
                 self._emit_log('采集到 0 条 Cookie，检查 Session 状态...', 'report')
                 need_login = await self._check_session(context)
                 if need_login:
-                    await self._do_login(context)
-                    payloads = await collect_cookies(context)
-                    all_cookies = await context.cookies()
-                    cookie_status = {d: any(d in c.get('domain', '') for c in all_cookies) for d in COOKIE_DOMAINS}
-                    self._emit_status({'cookie_status': cookie_status})
+                    login_ok = await self._do_login(context)
+                    if login_ok:
+                        payloads = await collect_cookies(context)
+                        all_cookies = await context.cookies()
+                        cookie_status = {d: any(d in c.get('domain', '') for c in all_cookies) for d in COOKIE_DOMAINS}
+                        self._emit_status({'cookie_status': cookie_status})
+                else:
+                    self._emit_log('Session 有效但无 Cookie，可能业务页面未正常加载', 'report')
 
             if not payloads:
                 self._emit_status({'sync': '无 Cookie 可上报'})
@@ -277,7 +292,7 @@ class BackgroundWorker(threading.Thread):
     def _emit_log(self, msg: str, category: str = 'general'):
         ts = datetime.now().strftime('%H:%M:%S')
         self.signals.log_message.emit(f'{ts} {msg}', category)
-        logger.info(msg)
+        logger.opt(depth=1).info(msg)
 
     def _emit_status(self, data: dict):
         self.signals.status_update.emit(data)

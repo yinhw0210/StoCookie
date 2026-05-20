@@ -22,6 +22,15 @@ HEARTBEAT_URLS = [
     'https://finance-fundmanage.sto.cn/prepaidment/prepaid/common/getBizType.action?showLevel=1',
 ]
 
+# 采集前需要访问的页面（确保浏览器产生对应域名的 Cookie）
+COOKIE_SEED_URLS = [
+    'https://finance-mng.sto.cn/',
+    'https://market-cod.sto.cn/cod/topayment/siteOrder/list',
+    'https://finance-fundmanage.sto.cn/prepaidment/prepaid/common/getBizType.action?showLevel=1',
+    'https://wutonggateway.sto.cn/',
+    'https://wangdian.sto.cn/page/fin-center/settlement/new-outbound-settlement',
+]
+
 COOKIE_RULES = [
     ('finance-mng.sto.cn', 'SESSION', lambda n, v: f'{n}={v}'),
     ('market-cod.sto.cn', 'cod', lambda n, v: f'{n}={v}'),
