@@ -1,3 +1,17 @@
+import os
+import sys
+
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+STORAGE_DIR = os.path.join(BASE_DIR, 'storage')
+LOG_DIR = os.path.join(BASE_DIR, 'logs')
+BROWSERS_DIR = os.path.join(BASE_DIR, 'browsers')
+
+STORAGE_STATE_PATH = os.path.join(STORAGE_DIR, 'state.json')
+
 HEARTBEAT_URLS = [
     'https://page.sto.cn/ux/manipulate-center/index',
     'https://front.sto.cn/group/customerCenter#/',
@@ -35,8 +49,6 @@ REPORT_URLS = [
 ]
 
 SSO_URL = 'https://page.sto.cn/sto-base-service/sto-sso-web/#/main?autoLogin=true&systemCode=SITE_KEEPER&returnUrl=/index'
-
-STORAGE_STATE_PATH = 'storage/state.json'
 
 COLLECT_INTERVAL_MINUTES = 1
 HEARTBEAT_INTERVAL_MINUTES = 3

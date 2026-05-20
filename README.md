@@ -48,6 +48,35 @@ playwright install chromium
 python main.py
 ```
 
+启动后会显示 GUI 窗口（PySide6），包含：
+- 状态面板：登录状态、同步结果、心跳状态、倒计时
+- 操作按钮：立即同步、重新登录
+- 日志面板：实时显示运行日志
+- 系统托盘：关闭窗口后最小化到托盘继续运行
+
+## Windows 打包
+
+```bash
+# 1. 安装依赖
+pip install -r requirements.txt
+
+# 2. 下载 Chromium 到 browsers/ 目录
+set PLAYWRIGHT_BROWSERS_PATH=.\browsers
+playwright install chromium
+
+# 3. PyInstaller 打包
+pyinstaller StoCookie.spec
+
+# 4. Inno Setup 生成安装包
+iscc installer.iss
+# 输出: StoCookie_Setup.exe
+```
+
+安装包功能：
+- 桌面快捷方式 + 开始菜单
+- 开机自启（注册表）
+- 内置 Chromium 浏览器
+
 ## 配置
 
 编辑 `config.py`：
@@ -63,12 +92,21 @@ python main.py
 ## 项目结构
 
 ```
-├── main.py                  # 入口 + 调度器
-├── config.py                # 配置
+├── main.py                  # 入口（启动 GUI + 后台任务）
+├── config.py                # 配置（路径动态化，支持 PyInstaller frozen）
+├── worker.py                # 后台工作线程（Playwright + 定时调度）
 ├── login.py                 # SSO 登录流程
 ├── desktop_automation.py    # 跨平台桌面自动化（点击钉钉确认弹窗）
 ├── cookie_collector.py      # Cookie 采集
 ├── cookie_reporter.py       # Cookie 上报
 ├── heartbeat.py             # 心跳保活
+├── gui/
+│   ├── __init__.py
+│   ├── main_window.py       # 主窗口（状态面板 + 日志 + 按钮）
+│   ├── tray_icon.py         # 系统托盘
+│   └── resources/
+│       └── icon.ico         # 应用图标
+├── StoCookie.spec           # PyInstaller 打包配置
+├── installer.iss            # Inno Setup 安装包脚本
 └── requirements.txt         # 依赖
 ```
