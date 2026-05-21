@@ -169,9 +169,27 @@ class BackgroundWorker(threading.Thread):
             await browser.close()
 
     async def _check_session(self, context) -> bool:
+        # 优先复用已有的 wangdian 页面做 reload 检测
+        wangdian_page = self._persistent_pages.get(WANGDIAN_INDEX_URL)
+        if wangdian_page and not wangdian_page.is_closed():
+            self._emit_log('复用已有 wangdian 页面检测 Session（reload）', 'login')
+            try:
+                await wangdian_page.reload(wait_until='domcontentloaded', timeout=20000)
+                await wangdian_page.wait_for_timeout(3000)
+                url = wangdian_page.url
+                self._emit_log(f'wangdian reload 后 URL: {url}', 'login')
+                if is_auth_url(url):
+                    self._emit_log(f'Session 过期，页面跳转到认证页: {url}', 'login')
+                    return True
+                self._emit_log('Session 有效，wangdian 页面未跳转', 'login')
+                return False
+            except Exception as e:
+                self._emit_log(f'复用 wangdian 页面检测失败: {e}，fallback 新开页面', 'login')
+
+        # fallback: 新开页面检测
         page = await context.new_page()
         try:
-            self._emit_log(f'访问登录入口检查 Session: {SSO_URL}', 'login')
+            self._emit_log(f'新开页面访问登录入口检查 Session: {SSO_URL}', 'login')
             await page.goto(SSO_URL, wait_until='domcontentloaded', timeout=20000)
             await page.wait_for_timeout(3000)
             self._emit_log(f'登录入口检查完成，当前 URL: {page.url}', 'login')
@@ -181,23 +199,23 @@ class BackgroundWorker(threading.Thread):
                 return False
 
             if is_auth_url(page.url):
-                self._emit_log(f'Session 未完成，网点入口已跳转认证页: {page.url}', 'login')
+                self._emit_log(f'Session 过期，网点入口已跳转认证页: {page.url}', 'login')
                 return True
 
             try:
                 await wait_for_wangdian_entry_or_role(page, timeout_ms=30000)
             except Exception as e:
                 if is_auth_url(page.url):
-                    self._emit_log(f'Session 未完成，仍在认证页: {page.url}', 'login')
+                    self._emit_log(f'Session 过期，仍在认证页: {page.url}', 'login')
                 else:
-                    self._emit_log(f'Session 未完成，未进入网点系统: {page.url} ({e})', 'login')
+                    self._emit_log(f'Session 状态不明，未进入网点系统: {page.url} ({e})', 'login')
                 return True
 
             if is_logged_in_url(page.url):
                 self._emit_log(f'Session 有效，已进入网点系统: {page.url}', 'login')
                 return False
 
-            self._emit_log(f'Session 未完成，未进入网点系统: {page.url}', 'login')
+            self._emit_log(f'Session 状态不明，未进入网点系统: {page.url}', 'login')
             return True
         except Exception as e:
             self._emit_log(f'Session 检测失败: {e}', 'login')
@@ -318,12 +336,16 @@ class BackgroundWorker(threading.Thread):
             search_input = page.locator(WANGDIAN_SEARCH_INPUT_SELECTOR).first
             await search_input.click(timeout=5000)
             await search_input.fill('')
+            await page.wait_for_timeout(300)
             await search_input.fill(keyword)
-            await page.wait_for_timeout(1500)
+            self._emit_log(f'搜索框已输入「{keyword}」，等待联想框出现...', 'general')
+
             first_result = page.locator(WANGDIAN_SEARCH_FIRST_RESULT_SELECTOR).first
-            await first_result.click(timeout=5000)
+            await first_result.wait_for(state='visible', timeout=8000)
+            self._emit_log(f'联想框已出现，点击第一个结果...', 'general')
+            await first_result.click()
             await page.wait_for_timeout(2000)
-            self._emit_log(f'搜索「{keyword}」并点击第一个结果完成', 'general')
+            self._emit_log(f'搜索「{keyword}」点击完成，当前 URL: {page.url}', 'general')
             return True
         except Exception as e:
             self._emit_log(f'搜索「{keyword}」失败: {e}', 'general')
@@ -357,21 +379,24 @@ class BackgroundWorker(threading.Thread):
             if url in self._persistent_pages:
                 page = self._persistent_pages[url]
                 if not page.is_closed():
+                    self._emit_log(f'常驻页面已存在且有效，跳过: {url}', 'general')
                     continue
+                else:
+                    self._emit_log(f'常驻页面已关闭，重新打开: {url}', 'general')
             try:
                 page = await context.new_page()
                 await page.goto(url, wait_until='domcontentloaded', timeout=15000)
                 await page.wait_for_timeout(2000)
+                self._emit_log(f'常驻页面导航完成，当前 URL: {page.url}', 'general')
                 if is_auth_url(page.url):
-                    self._emit_log(f'常驻页面跳转到登录页，执行登录流程: {url}', 'general')
+                    self._emit_log(f'常驻页面跳转到登录页，执行登录流程: {url}', 'login')
                     try:
                         await login_via_dingtalk(page)
                         await page.wait_for_timeout(2000)
                     except Exception as e:
-                        self._emit_log(f'常驻页面登录失败: {url} -> {e}', 'general')
+                        self._emit_log(f'常驻页面登录失败: {url} -> {e}', 'login')
                         await page.close()
                         continue
-                    # 登录后检查是否回到了目标页，没有则手动导航
                     if url not in page.url:
                         self._emit_log(f'登录后未重定向到目标页，手动导航: {url}', 'general')
                         await page.goto(url, wait_until='domcontentloaded', timeout=15000)
@@ -387,20 +412,23 @@ class BackgroundWorker(threading.Thread):
 
     async def _reload_persistent_pages(self, context) -> bool:
         session_expired = False
+        self._emit_log(f'reload 常驻页面: {len(self._persistent_pages)} 个', 'heartbeat')
         for url, page in list(self._persistent_pages.items()):
             try:
                 if page.is_closed():
+                    self._emit_log(f'常驻页面已关闭，重新打开: {url}', 'heartbeat')
                     page = await context.new_page()
                     await page.goto(url, wait_until='domcontentloaded', timeout=15000)
                     self._persistent_pages[url] = page
-                    self._emit_log(f'常驻页面重新打开: {url}', 'heartbeat')
                 else:
+                    self._emit_log(f'reload: {url}', 'heartbeat')
                     await page.reload(wait_until='domcontentloaded', timeout=15000)
 
                 await page.wait_for_timeout(2000)
+                self._emit_log(f'reload 后 URL: {page.url}', 'heartbeat')
 
                 if is_auth_url(page.url):
-                    self._emit_log(f'常驻页面 reload 后跳转到登录页: {url}', 'heartbeat')
+                    self._emit_log(f'常驻页面 reload 后跳转到登录页: {url} → {page.url}', 'heartbeat')
                     session_expired = True
                     break
 
@@ -412,8 +440,9 @@ class BackgroundWorker(threading.Thread):
                     page = await context.new_page()
                     await page.goto(url, wait_until='domcontentloaded', timeout=15000)
                     self._persistent_pages[url] = page
-                except Exception:
-                    pass
+                    self._emit_log(f'常驻页面重新打开成功: {url}', 'heartbeat')
+                except Exception as e2:
+                    self._emit_log(f'常驻页面重新打开也失败: {url} -> {e2}', 'heartbeat')
 
         if not session_expired:
             await context.storage_state(path=STORAGE_STATE_PATH)
@@ -421,28 +450,36 @@ class BackgroundWorker(threading.Thread):
 
     async def _do_sync_cycle(self, context):
         self._emit_status({'sync': '同步中...', 'heartbeat': '检测中...'})
+        self._emit_log('=== 同步周期开始 ===', 'report')
         try:
             need_login = await self._check_session(context)
             if need_login:
                 self._emit_status({'heartbeat': 'Session 过期'})
-                self._emit_log('同步前检测: Session 过期，需重新登录', 'heartbeat')
-                await self._do_login(context)
+                self._emit_log('同步前检测: Session 过期，开始登录', 'login')
+                login_ok = await self._do_login(context)
+                if not login_ok:
+                    self._emit_log('登录失败，本次同步中止', 'report')
+                    self._emit_status({'sync': '登录失败，同步中止'})
+                    return
                 await self._open_persistent_pages(context)
-                return
 
+            self._emit_log('开始 reload 常驻页面...', 'heartbeat')
             alive = await self._reload_persistent_pages(context)
             if not alive:
                 self._emit_status({'heartbeat': 'Session 过期'})
                 self._emit_log('reload 检测到 Session 过期，重新登录', 'heartbeat')
-                await self._do_login(context)
+                login_ok = await self._do_login(context)
+                if not login_ok:
+                    self._emit_log('登录失败，本次同步中止', 'report')
+                    self._emit_status({'sync': '登录失败，同步中止'})
+                    return
                 await self._open_persistent_pages(context)
-                return
 
             self._emit_status({'heartbeat': '正常'})
-            self._emit_log('常驻页面 reload 完成，心跳正常', 'heartbeat')
+            self._emit_log('常驻页面 reload 完成，开始采集 Cookie', 'report')
 
             payloads = await collect_cookies(context)
-            self._emit_log(f'Cookie payload 生成完成: {len(payloads)} 条', 'report')
+            self._emit_log(f'Cookie 采集完成: {len(payloads)} 条', 'report')
 
             all_cookies = await context.cookies()
             cookie_status = {}
@@ -454,6 +491,7 @@ class BackgroundWorker(threading.Thread):
                 self._emit_log('采集到 0 条 Cookie，无数据上报', 'report')
                 return
 
+            self._emit_log(f'开始上报 {len(payloads)} 条 Cookie...', 'report')
             reports = await report_cookies(payloads)
 
             now_str = datetime.now().strftime('%H:%M:%S')
@@ -479,10 +517,10 @@ class BackgroundWorker(threading.Thread):
 
             if total_fail > 0:
                 self._emit_status({'sync': f'部分失败 ({now_str}, 成功{total_success}/失败{total_fail})'})
-                self._emit_log(f'上报完成: {len(payloads)}条Cookie, 成功{total_success}/失败{total_fail}', 'report')
+                self._emit_log(f'=== 同步完成: {len(payloads)}条Cookie, 成功{total_success}/失败{total_fail} ===', 'report')
             else:
                 self._emit_status({'sync': f'成功 ({now_str}, {len(payloads)}条)'})
-                self._emit_log(f'上报完成: {len(payloads)}条Cookie, 全部成功({total_success}次)', 'report')
+                self._emit_log(f'=== 同步完成: {len(payloads)}条Cookie, 全部成功({total_success}次) ===', 'report')
         except Exception as e:
             self._emit_status({'sync': f'失败: {e}'})
             self._emit_log(f'同步周期异常: {e}', 'report')
