@@ -225,10 +225,10 @@ async def wait_for_wangdian_entry_or_role(page: Page, timeout_ms: int = 60000) -
 wait_for_wangdian_index_or_role = wait_for_wangdian_entry_or_role
 
 
-async def login_via_dingtalk(page: Page) -> bool:
+async def login_via_dingtalk(page: Page, skip_navigate: bool = False) -> bool:
     """
     完整登录流程：
-    1. 打开网点系统入口
+    1. 打开网点系统入口（如果 skip_navigate=True 则跳过，直接在当前页面操作）
     2. 定位钉钉 iframe
     3. 关闭 Cookie 弹窗（iframe 内）
     4. 点击用户头像
@@ -237,12 +237,14 @@ async def login_via_dingtalk(page: Page) -> bool:
     7. 等待进入网点首页，如出现虎盾或角色选择则自动处理
     """
     logger.info('开始钉钉登录...')
-    await page.goto(SSO_URL)
-    await page.wait_for_timeout(3000)
 
-    if is_logged_in_url(page.url):
-        logger.info(f'网点系统入口未跳转认证页，已登录: {page.url}')
-        return True
+    if not skip_navigate:
+        await page.goto(SSO_URL)
+        await page.wait_for_timeout(3000)
+
+        if is_logged_in_url(page.url):
+            logger.info(f'网点系统入口未跳转认证页，已登录: {page.url}')
+            return True
 
     if await click_safety_quick_login_if_present(page):
         await wait_for_wangdian_entry_or_role(page)

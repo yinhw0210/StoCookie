@@ -33,7 +33,8 @@ def main():
 
     worker = BackgroundWorker()
 
-    logger.add(QtLogSink(worker.signals.log_message), format='{time:HH:mm:ss} {message}', level='INFO')
+    # 注意：worker._emit_log 已直接 emit 到 GUI，不再通过 loguru 重复转发
+    # logger.add(QtLogSink(worker.signals.log_message), format='{time:HH:mm:ss} {message}', level='INFO')
 
     window = MainWindow(worker)
     tray = TrayIcon(window, worker)

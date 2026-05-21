@@ -87,5 +87,5 @@ def is_auth_url(url: str) -> bool:
 def is_logged_in_url(url: str) -> bool:
     return url.startswith(WANGDIAN_INDEX_URL) or url.rstrip('/') == LOGIN_ENTRY_URL
 
-COLLECT_INTERVAL_MINUTES = 1
-HEARTBEAT_INTERVAL_MINUTES = 1
+COLLECT_INTERVAL_MINUTES = 60
+HEARTBEAT_INTERVAL_MINUTES = 60

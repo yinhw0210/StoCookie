@@ -127,7 +127,8 @@ class BackgroundWorker(threading.Thread):
             if login_ok:
                 await self._open_persistent_pages(context)
                 self._emit_status({'sync': '等待同步'})
-                self._emit_log('启动 SSO 校验完成，常驻页面已打开，等待定时 Cookie 同步', 'report')
+                self._emit_log('启动 SSO 校验完成，常驻页面已打开，执行首次上报', 'report')
+                await self._do_collect_and_report(context)
             else:
                 self._emit_status({'sync': '等待登录'})
                 self._emit_log('启动登录未完成，跳过首次 Cookie 同步', 'report')
@@ -186,36 +187,34 @@ class BackgroundWorker(threading.Thread):
             except Exception as e:
                 self._emit_log(f'复用 wangdian 页面检测失败: {e}，fallback 新开页面', 'login')
 
-        # fallback: 新开页面检测
+        # fallback: 新开页面检测（仅在没有已打开的 wangdian 页面时使用）
         page = await context.new_page()
         try:
             self._emit_log(f'新开页面访问登录入口检查 Session: {SSO_URL}', 'login')
             await page.goto(SSO_URL, wait_until='domcontentloaded', timeout=20000)
             await page.wait_for_timeout(3000)
-            self._emit_log(f'登录入口检查完成，当前 URL: {page.url}', 'login')
+            url = page.url
+            self._emit_log(f'登录入口检查完成，当前 URL: {url}', 'login')
 
-            if is_logged_in_url(page.url):
-                self._emit_log(f'Session 有效，网点入口未跳转认证页: {page.url}', 'login')
+            if is_logged_in_url(url):
+                self._emit_log(f'Session 有效，网点入口未跳转认证页: {url}', 'login')
                 return False
 
-            if is_auth_url(page.url):
-                self._emit_log(f'Session 过期，网点入口已跳转认证页: {page.url}', 'login')
+            if is_auth_url(url):
+                self._emit_log(f'Session 过期，网点入口已跳转认证页: {url}', 'login')
                 return True
 
+            # 等待看是否能进入系统
             try:
-                await wait_for_wangdian_entry_or_role(page, timeout_ms=30000)
-            except Exception as e:
-                if is_auth_url(page.url):
-                    self._emit_log(f'Session 过期，仍在认证页: {page.url}', 'login')
-                else:
-                    self._emit_log(f'Session 状态不明，未进入网点系统: {page.url} ({e})', 'login')
-                return True
+                await wait_for_wangdian_entry_or_role(page, timeout_ms=15000)
+            except Exception:
+                pass
 
             if is_logged_in_url(page.url):
                 self._emit_log(f'Session 有效，已进入网点系统: {page.url}', 'login')
                 return False
 
-            self._emit_log(f'Session 状态不明，未进入网点系统: {page.url}', 'login')
+            self._emit_log(f'Session 状态不明，当前 URL: {page.url}', 'login')
             return True
         except Exception as e:
             self._emit_log(f'Session 检测失败: {e}', 'login')
@@ -256,6 +255,15 @@ class BackgroundWorker(threading.Thread):
                 await old_page.close()
             except Exception:
                 pass
+
+    async def _close_login_page(self):
+        if self._login_page and not self._login_page.is_closed():
+            try:
+                await self._login_page.close()
+                self._emit_log('已关闭遗留的登录页面', 'login')
+            except Exception:
+                pass
+            self._login_page = None
 
     def _register_wangdian_trigger(self, context):
         if self._response_listener_registered:
@@ -388,25 +396,61 @@ class BackgroundWorker(threading.Thread):
                 await page.goto(url, wait_until='domcontentloaded', timeout=15000)
                 await page.wait_for_timeout(2000)
                 self._emit_log(f'常驻页面导航完成，当前 URL: {page.url}', 'general')
+
                 if is_auth_url(page.url):
-                    self._emit_log(f'常驻页面跳转到登录页，执行登录流程: {url}', 'login')
-                    try:
-                        await login_via_dingtalk(page)
-                        await page.wait_for_timeout(2000)
-                    except Exception as e:
-                        self._emit_log(f'常驻页面登录失败: {url} -> {e}', 'login')
-                        await page.close()
-                        continue
-                    if url not in page.url:
-                        self._emit_log(f'登录后未重定向到目标页，手动导航: {url}', 'general')
-                        await page.goto(url, wait_until='domcontentloaded', timeout=15000)
-                        await page.wait_for_timeout(2000)
+                    if 'page.sto.cn' in url:
+                        # page.sto.cn 有独立 session，当前页面已经在 SSO 页，直接登录
+                        self._emit_log(f'page.sto.cn 需要独立登录，执行登录流程', 'login')
+                        try:
+                            await login_via_dingtalk(page, skip_navigate=True)
+                            await page.wait_for_timeout(3000)
+                            # 登录后等待自动跳转回目标页
+                            if 'manipulate-center' not in page.url:
+                                await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+                                await page.wait_for_timeout(2000)
+                            self._emit_log(f'page.sto.cn 登录完成，当前 URL: {page.url}', 'login')
+                        except Exception as e:
+                            self._emit_log(f'page.sto.cn 登录失败: {e}', 'login')
+                            await page.close()
+                            continue
+                    elif 'market-cod.sto.cn' in url:
+                        # market-cod 有独立 session，当前页面已经在 SSO 页，直接登录
+                        self._emit_log(f'market-cod 需要独立登录，执行登录流程', 'login')
+                        try:
+                            await login_via_dingtalk(page, skip_navigate=True)
+                            await page.wait_for_timeout(2000)
+                            # 登录后跳转到 /cod/home/index，需要再次导航到目标页
+                            if 'topayment/siteOrder/list' not in page.url:
+                                self._emit_log(f'market-cod 登录后跳转到: {page.url}，再次导航到目标页', 'general')
+                                await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+                                await page.wait_for_timeout(2000)
+                            self._emit_log(f'market-cod 登录完成，当前 URL: {page.url}', 'login')
+                        except Exception as e:
+                            self._emit_log(f'market-cod 登录失败: {e}', 'login')
+                            await page.close()
+                            continue
+                    else:
+                        # 其他页面（wangdian 子页面等）共享 wangdian session，不应该出现 SSO
+                        self._emit_log(f'常驻页面意外跳转到登录页: {url} → {page.url}', 'login')
+                        try:
+                            await login_via_dingtalk(page, skip_navigate=True)
+                            await page.wait_for_timeout(2000)
+                            if url not in page.url:
+                                await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+                                await page.wait_for_timeout(2000)
+                        except Exception as e:
+                            self._emit_log(f'常驻页面登录失败: {url} -> {e}', 'login')
+                            await page.close()
+                            continue
+
                 if 'wangdian.sto.cn/index' in url:
                     await self._handle_wangdian_index(context, page)
                 self._persistent_pages[url] = page
                 self._emit_log(f'常驻页面已打开: {url}', 'general')
             except Exception as e:
                 self._emit_log(f'常驻页面打开失败: {url} -> {e}', 'general')
+        # 关闭 _do_login 遗留的登录页面
+        await self._close_login_page()
         await context.storage_state(path=STORAGE_STATE_PATH)
         self._emit_log(f'常驻页面打开完成，共 {len(self._persistent_pages)} 个', 'general')
 
@@ -428,9 +472,26 @@ class BackgroundWorker(threading.Thread):
                 self._emit_log(f'reload 后 URL: {page.url}', 'heartbeat')
 
                 if is_auth_url(page.url):
-                    self._emit_log(f'常驻页面 reload 后跳转到登录页: {url} → {page.url}', 'heartbeat')
-                    session_expired = True
-                    break
+                    # page.sto.cn 和 market-cod 有独立 session，跳转到 SSO 不代表全局过期
+                    # 对这些页面单独走登录流程（当前页面已在 SSO，用 skip_navigate）
+                    if 'page.sto.cn' in url or 'market-cod.sto.cn' in url:
+                        self._emit_log(f'独立 session 页面需要重新登录: {url}', 'heartbeat')
+                        try:
+                            await login_via_dingtalk(page, skip_navigate=True)
+                            await page.wait_for_timeout(2000)
+                            if url not in page.url:
+                                await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+                                await page.wait_for_timeout(2000)
+                            if 'market-cod.sto.cn' in url and 'topayment/siteOrder/list' not in page.url:
+                                await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+                                await page.wait_for_timeout(2000)
+                            self._emit_log(f'独立 session 页面重新登录完成: {url}', 'heartbeat')
+                        except Exception as e:
+                            self._emit_log(f'独立 session 页面登录失败: {url} -> {e}', 'heartbeat')
+                    else:
+                        self._emit_log(f'常驻页面 reload 后跳转到登录页: {url} → {page.url}', 'heartbeat')
+                        session_expired = True
+                        break
 
                 if 'wangdian.sto.cn/index' in url:
                     await self._dismiss_announcement(page)
@@ -448,36 +509,10 @@ class BackgroundWorker(threading.Thread):
             await context.storage_state(path=STORAGE_STATE_PATH)
         return not session_expired
 
-    async def _do_sync_cycle(self, context):
-        self._emit_status({'sync': '同步中...', 'heartbeat': '检测中...'})
-        self._emit_log('=== 同步周期开始 ===', 'report')
+    async def _do_collect_and_report(self, context):
+        """仅执行 Cookie 采集和上报，不做 session 检测和 reload"""
+        self._emit_log('=== 开始采集上报 ===', 'report')
         try:
-            need_login = await self._check_session(context)
-            if need_login:
-                self._emit_status({'heartbeat': 'Session 过期'})
-                self._emit_log('同步前检测: Session 过期，开始登录', 'login')
-                login_ok = await self._do_login(context)
-                if not login_ok:
-                    self._emit_log('登录失败，本次同步中止', 'report')
-                    self._emit_status({'sync': '登录失败，同步中止'})
-                    return
-                await self._open_persistent_pages(context)
-
-            self._emit_log('开始 reload 常驻页面...', 'heartbeat')
-            alive = await self._reload_persistent_pages(context)
-            if not alive:
-                self._emit_status({'heartbeat': 'Session 过期'})
-                self._emit_log('reload 检测到 Session 过期，重新登录', 'heartbeat')
-                login_ok = await self._do_login(context)
-                if not login_ok:
-                    self._emit_log('登录失败，本次同步中止', 'report')
-                    self._emit_status({'sync': '登录失败，同步中止'})
-                    return
-                await self._open_persistent_pages(context)
-
-            self._emit_status({'heartbeat': '正常'})
-            self._emit_log('常驻页面 reload 完成，开始采集 Cookie', 'report')
-
             payloads = await collect_cookies(context)
             self._emit_log(f'Cookie 采集完成: {len(payloads)} 条', 'report')
 
@@ -517,10 +552,44 @@ class BackgroundWorker(threading.Thread):
 
             if total_fail > 0:
                 self._emit_status({'sync': f'部分失败 ({now_str}, 成功{total_success}/失败{total_fail})'})
-                self._emit_log(f'=== 同步完成: {len(payloads)}条Cookie, 成功{total_success}/失败{total_fail} ===', 'report')
+                self._emit_log(f'=== 上报完成: {len(payloads)}条Cookie, 成功{total_success}/失败{total_fail} ===', 'report')
             else:
                 self._emit_status({'sync': f'成功 ({now_str}, {len(payloads)}条)'})
-                self._emit_log(f'=== 同步完成: {len(payloads)}条Cookie, 全部成功({total_success}次) ===', 'report')
+                self._emit_log(f'=== 上报完成: {len(payloads)}条Cookie, 全部成功({total_success}次) ===', 'report')
+        except Exception as e:
+            self._emit_status({'sync': f'上报失败: {e}'})
+            self._emit_log(f'采集上报异常: {e}', 'report')
+
+    async def _do_sync_cycle(self, context):
+        self._emit_status({'sync': '同步中...', 'heartbeat': '检测中...'})
+        self._emit_log('=== 同步周期开始 ===', 'report')
+        try:
+            need_login = await self._check_session(context)
+            if need_login:
+                self._emit_status({'heartbeat': 'Session 过期'})
+                self._emit_log('同步前检测: Session 过期，开始登录', 'login')
+                login_ok = await self._do_login(context)
+                if not login_ok:
+                    self._emit_log('登录失败，本次同步中止', 'report')
+                    self._emit_status({'sync': '登录失败，同步中止'})
+                    return
+                await self._open_persistent_pages(context)
+
+            self._emit_log('开始 reload 常驻页面...', 'heartbeat')
+            alive = await self._reload_persistent_pages(context)
+            if not alive:
+                self._emit_status({'heartbeat': 'Session 过期'})
+                self._emit_log('reload 检测到 Session 过期，重新登录', 'heartbeat')
+                login_ok = await self._do_login(context)
+                if not login_ok:
+                    self._emit_log('登录失败，本次同步中止', 'report')
+                    self._emit_status({'sync': '登录失败，同步中止'})
+                    return
+                await self._open_persistent_pages(context)
+
+            self._emit_status({'heartbeat': '正常'})
+            self._emit_log('常驻页面 reload 完成', 'heartbeat')
+            await self._do_collect_and_report(context)
         except Exception as e:
             self._emit_status({'sync': f'失败: {e}'})
             self._emit_log(f'同步周期异常: {e}', 'report')
