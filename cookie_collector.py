@@ -8,6 +8,17 @@ from config import (
     COMBO_RULES,
 )
 
+
+def _domain_match(cookie_domain: str, rule_domain: str) -> bool:
+    """
+    模拟浏览器 cookie domain 匹配逻辑：
+    - rule_domain 以 '.' 开头（如 '.sto.cn'）：cookie_domain 必须精确等于它
+    - 否则：cookie_domain 包含 rule_domain 即可（如 'finance-mng.sto.cn' in '.finance-mng.sto.cn'）
+    """
+    if rule_domain.startswith('.'):
+        return cookie_domain == rule_domain
+    return rule_domain in cookie_domain
+
 # 插件上报的完整类型列表（用于 GUI 展示逐条状态）
 EXPECTED_REPORT_ITEMS = [
     {'label': 'SESSION (finance-mng)', 'rule_domain': 'finance-mng.sto.cn', 'rule_name': 'SESSION'},
@@ -48,15 +59,14 @@ async def collect_cookies(context: BrowserContext) -> list[str]:
 
     # 单条规则匹配
     for domain, name, fmt in COOKIE_RULES:
-        matched = [c for c in all_cookies if domain in c.get('domain', '') and c['name'] == name]
+        matched = [c for c in all_cookies if _domain_match(c.get('domain', ''), domain) and c['name'] == name]
         if matched:
             c = matched[0]
             payload = fmt(c['name'], c['value'])
             payloads.append(payload)
             logger.info(f'✓ 命中规则: {name}@{domain} → payload={payload[:80]}')
         else:
-            # 打印该域名下实际有哪些 cookie name，帮助排查
-            domain_cookies = [c for c in all_cookies if domain in c.get('domain', '')]
+            domain_cookies = [c for c in all_cookies if _domain_match(c.get('domain', ''), domain)]
             if domain_cookies:
                 actual_names = [c['name'] for c in domain_cookies]
                 logger.warning(f'✗ 未命中规则: {name}@{domain}，该域名下实际有: {", ".join(actual_names)}')
@@ -67,7 +77,7 @@ async def collect_cookies(context: BrowserContext) -> list[str]:
     for rule in COMBO_RULES:
         target = [
             c for c in all_cookies
-            if rule['domain'] in c.get('domain', '') and c['name'] in rule['names']
+            if _domain_match(c.get('domain', ''), rule['domain']) and c['name'] in rule['names']
         ]
         found_names = [c['name'] for c in target]
         missing_names = [n for n in rule['names'] if n not in found_names]

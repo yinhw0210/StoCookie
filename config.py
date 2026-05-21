@@ -34,20 +34,20 @@ COOKIE_RULES = [
     ('finance-mng.sto.cn', 'SESSION', lambda n, v: f'{n}={v}'),
     ('market-cod.sto.cn', 'cod', lambda n, v: f'{n}={v}'),
     ('finance-fundmanage.sto.cn', 'SESSION', lambda n, v: f'finance={v}'),
-    ('wutonggateway.sto.cn', 'spf_sid', lambda n, v: f'{n}={v}'),
-    ('wutonggateway.sto.cn', 'stoToken', lambda n, v: f'{n}={v}'),
-    ('wutonggateway.sto.cn', 'sid_cfo', lambda n, v: f'{n}={v}'),
-    ('wutonggateway.sto.cn', 'WD_SESSION', lambda n, v: f'{n}={v}'),
+    ('.sto.cn', 'spf_sid', lambda n, v: f'{n}={v}'),
+    ('.sto.cn', 'stoToken', lambda n, v: f'{n}={v}'),
+    ('.sto.cn', 'sid_cfo', lambda n, v: f'{n}={v}'),
+    ('.sto.cn', 'WD_SESSION', lambda n, v: f'{n}={v}'),
 ]
 
 COMBO_RULES = [
     {
-        'domain': 'wutonggateway.sto.cn',
+        'domain': '.sto.cn',
         'names': ['WD_SESSION', 'TSID'],
         'format': lambda cookies: ';'.join(f'{c["name"]}={c["value"]}' for c in cookies),
     },
     {
-        'domain': 'wutonggateway.sto.cn',
+        'domain': '.sto.cn',
         'names': ['sid_cfo', 'WD_SESSION', 'TSID'],
         'format': lambda cookies: 'CFO_DOWNLOAD' + ';'.join(f'{c["name"]}={c["value"]}' for c in cookies),
     },

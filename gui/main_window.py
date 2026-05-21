@@ -37,11 +37,6 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(status_group)
 
-        # Cookie 状态一览
-        self._lbl_cookie_status = QLabel('Cookie: --')
-        self._lbl_cookie_status.setWordWrap(True)
-        layout.addWidget(self._lbl_cookie_status)
-
         # 上报状态一览
         self._lbl_report_status = QLabel('上报状态: --')
         self._lbl_report_status.setWordWrap(True)
@@ -161,12 +156,6 @@ class MainWindow(QMainWindow):
             h, rem = divmod(data['next_heartbeat'], 3600)
             m, s = divmod(rem, 60)
             self._lbl_next_heartbeat.setText(f'下次心跳：{h:02d}:{m:02d}:{s:02d}')
-        if 'cookie_status' in data:
-            parts = []
-            for domain, has_cookie in data['cookie_status'].items():
-                mark = '✓' if has_cookie else '✗'
-                parts.append(f'{domain} {mark}')
-            self._lbl_cookie_status.setText(f'Cookie 域名: {" | ".join(parts)}')
         if 'report_status' in data:
             parts = []
             for label, info in data['report_status'].items():
