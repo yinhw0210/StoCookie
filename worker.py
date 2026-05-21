@@ -75,6 +75,7 @@ class BackgroundWorker(threading.Thread):
         self._last_wangdian_trigger = 0.0
         self._response_listener_registered = False
         self._persistent_pages: dict[str, object] = {}
+        self._pdd = None
 
         settings = _load_settings()
         self._collect_interval = settings.get('collect_interval', COLLECT_INTERVAL_MINUTES)
@@ -131,6 +132,9 @@ class BackgroundWorker(threading.Thread):
                 self._emit_status({'sync': '等待登录'})
                 self._emit_log('启动登录未完成，跳过首次 Cookie 同步', 'report')
 
+            # PDD 站点初始化
+            await self._init_pdd(browser)
+
             last_sync = time.time()
 
             while not self._stop_event.is_set():
@@ -147,6 +151,8 @@ class BackgroundWorker(threading.Thread):
                 if self._manual_sync_event.is_set():
                     self._manual_sync_event.clear()
                     await self._do_sync_cycle(context)
+                    if self._pdd:
+                        await self._do_pdd_sync_cycle()
                     last_sync = time.time()
 
                 now = time.time()
@@ -154,6 +160,8 @@ class BackgroundWorker(threading.Thread):
 
                 if sync_due:
                     await self._do_sync_cycle(context)
+                    if self._pdd:
+                        await self._do_pdd_sync_cycle()
                     last_sync = time.time()
 
                 next_sync = max(0, self._collect_interval * 60 - (time.time() - last_sync))
@@ -657,6 +665,78 @@ class BackgroundWorker(threading.Thread):
             if cookie_prefix.startswith(prefix):
                 return label
         return cookie_prefix[:30]
+
+    # ========== PDD 站点方法 ==========
+
+    async def _init_pdd(self, browser):
+        """初始化 PDD 站点（独立 context）"""
+        settings = _load_settings()
+        pdd_enabled = settings.get('pdd_enabled', False)
+        pdd_account = settings.get('pdd_account', '')
+        pdd_password = settings.get('pdd_password', '')
+
+        if not pdd_enabled or not pdd_account:
+            self._emit_log('PDD: 未启用或未配置账号，跳过', 'pdd')
+            self._pdd = None
+            return
+
+        from sites.pdd import PddSiteDriver
+        self._pdd = PddSiteDriver(
+            account=pdd_account,
+            password=pdd_password,
+            emit_log=self._emit_log,
+        )
+        await self._pdd.create_context(browser)
+
+        session_ok = await self._pdd.check_session()
+        if not session_ok:
+            login_ok = await self._pdd.login()
+            if not login_ok:
+                self._emit_log('PDD: 启动登录失败，后续定时重试', 'pdd')
+                return
+
+        self._emit_log('PDD: 初始化完成，执行首次采集上报', 'pdd')
+        await self._do_pdd_collect_and_report()
+
+    async def _do_pdd_sync_cycle(self):
+        """PDD 的采集-上报周期"""
+        if not self._pdd:
+            return
+        try:
+            self._emit_log('PDD: === 同步周期开始 ===', 'pdd')
+            session_ok = await self._pdd.check_session()
+            if not session_ok:
+                self._emit_log('PDD: Session 过期，重新登录', 'pdd')
+                if not await self._pdd.login():
+                    self._emit_log('PDD: 登录失败，本次同步跳过', 'pdd')
+                    self._emit_status({'pdd_status': {'SUB_PASS_ID (PDD)': {'ok': False, 'error': '登录失败', 'time': datetime.now().strftime('%H:%M:%S')}}})
+                    return
+
+            await self._do_pdd_collect_and_report()
+        except Exception as e:
+            self._emit_log(f'PDD: 同步异常: {e}', 'pdd')
+
+    async def _do_pdd_collect_and_report(self):
+        """PDD 采集并上报"""
+        if not self._pdd:
+            return
+        now_str = datetime.now().strftime('%H:%M:%S')
+        payloads = await self._pdd.collect()
+        if not payloads:
+            self._emit_status({'pdd_status': {'SUB_PASS_ID (PDD)': {'ok': False, 'error': '未采集到', 'time': now_str}}})
+            return
+
+        reports = await report_cookies(payloads)
+        for entry in reports:
+            all_ok = all(r['ok'] for r in entry['results'])
+            if all_ok:
+                self._emit_log('PDD: ✓ SUB_PASS_ID 上报成功', 'pdd')
+                self._emit_status({'pdd_status': {'SUB_PASS_ID (PDD)': {'ok': True, 'time': now_str}}})
+            else:
+                errors = [f'{r["url"]}:{r["error"]}' for r in entry['results'] if not r['ok']]
+                self._emit_log(f'PDD: ✗ SUB_PASS_ID 上报失败 → {", ".join(errors)}', 'pdd')
+                self._emit_status({'pdd_status': {'SUB_PASS_ID (PDD)': {'ok': False, 'error': ', '.join(errors), 'time': now_str}}})
+        self._emit_log('PDD: === 同步周期结束 ===', 'pdd')
 
     def trigger_sync(self):
         self._manual_sync_event.set()

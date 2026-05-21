@@ -31,6 +31,7 @@ EXPECTED_REPORT_ITEMS = [
     {'label': 'WD_SESSION+TSID 组合', 'combo': True, 'names': ['WD_SESSION', 'TSID']},
     {'label': 'CFO_DOWNLOAD 组合', 'combo': True, 'names': ['sid_cfo', 'WD_SESSION', 'TSID']},
     {'label': 'KFSD (wangdian全量)', 'kfsd': True},
+    {'label': 'SUB_PASS_ID (PDD)', 'pdd': True},
 ]
 
 

@@ -42,6 +42,11 @@ class MainWindow(QMainWindow):
         self._lbl_report_status.setWordWrap(True)
         layout.addWidget(self._lbl_report_status)
 
+        # PDD 状态
+        self._lbl_pdd_status = QLabel('PDD: --')
+        self._lbl_pdd_status.setWordWrap(True)
+        layout.addWidget(self._lbl_pdd_status)
+
         # 按钮行 1
         btn_layout1 = QHBoxLayout()
         self._btn_sync = QPushButton('立即同步')
@@ -66,7 +71,7 @@ class MainWindow(QMainWindow):
         self._log_views = {}
         log_font = QFont('Consolas', 9)
 
-        for tab_name in ('全部', '登录', '上报', '心跳', '错误'):
+        for tab_name in ('全部', '登录', '上报', '心跳', 'PDD', '错误'):
             text_edit = QTextEdit()
             text_edit.setReadOnly(True)
             text_edit.setFont(log_font)
@@ -125,6 +130,7 @@ class MainWindow(QMainWindow):
             'login': '登录',
             'report': '上报',
             'heartbeat': '心跳',
+            'pdd': 'PDD',
         }
         if category in category_map:
             self._append_log(category_map[category], msg)
@@ -166,6 +172,15 @@ class MainWindow(QMainWindow):
                 else:
                     parts.append(f'✗ {label}')
             self._lbl_report_status.setText(f'上报状态:\n' + '\n'.join(parts))
+        if 'pdd_status' in data:
+            parts = []
+            for label, info in data['pdd_status'].items():
+                if info['ok']:
+                    parts.append(f'✓ {label}')
+                else:
+                    error = info.get('error', '')
+                    parts.append(f'✗ {label} ({error})' if error else f'✗ {label}')
+            self._lbl_pdd_status.setText(f'PDD:\n' + '\n'.join(parts))
         if 'paused' in data and data['paused']:
             self._lbl_next_collect.setText('下次同步：⏸ 已暂停')
             self._lbl_next_heartbeat.setText('下次心跳：⏸ 已暂停')

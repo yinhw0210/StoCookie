@@ -89,3 +89,10 @@ def is_logged_in_url(url: str) -> bool:
 
 COLLECT_INTERVAL_MINUTES = 60
 HEARTBEAT_INTERVAL_MINUTES = 60
+
+# PDD 站点配置
+PDD_LOGIN_URL = 'https://56-partner.pinduoduo.com/auth/login'
+PDD_TARGET_URL = 'https://56-partner.pinduoduo.com/delivery-workbench/order'
+PDD_COOKIE_DOMAIN = '56-partner-api.pinduoduo.com'
+PDD_COOKIE_NAME = 'SUB_PASS_ID'
+PDD_STORAGE_PATH = os.path.join(STORAGE_DIR, 'pdd_state.json')
