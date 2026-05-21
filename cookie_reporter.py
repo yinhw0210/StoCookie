@@ -25,8 +25,14 @@ async def report_cookies(payloads: list[str]) -> list[dict]:
                 try:
                     resp = await client.get(url)
                     if resp.status_code == 200:
-                        entry['results'].append({'url': short_name, 'ok': True, 'error': None})
-                        logger.debug(f'上报成功: {short_name} ← {cookie_str[:40]}...')
+                        body = resp.text
+                        # 检查响应体是否包含错误信息
+                        if '"code":0' in body or '"success":true' in body.lower() or len(body) < 5:
+                            entry['results'].append({'url': short_name, 'ok': True, 'error': None})
+                            logger.debug(f'上报成功: {short_name} ← {cookie_str[:40]}...')
+                        else:
+                            entry['results'].append({'url': short_name, 'ok': False, 'error': body[:100]})
+                            logger.warning(f'上报返回异常: {short_name} ← {body[:100]}')
                     else:
                         entry['results'].append({'url': short_name, 'ok': False, 'error': f'HTTP {resp.status_code}'})
                         logger.warning(f'上报异常 HTTP {resp.status_code}: {short_name}')

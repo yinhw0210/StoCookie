@@ -265,6 +265,43 @@ class BackgroundWorker(threading.Thread):
                 pass
             self._login_page = None
 
+    async def _do_sso_login_on_page(self, page):
+        """在已经跳转到 SSO 页面的 page 上完成钉钉登录，不导航到 wangdian"""
+        from login import (
+            _get_dingtalk_frame, _dismiss_cookie_dialog, _click_avatar,
+            _click_confirm_login, _click_consent, click_safety_quick_login_if_present,
+        )
+        from desktop_automation import click_dingtalk_confirm
+
+        await page.wait_for_timeout(2000)
+
+        if await click_safety_quick_login_if_present(page):
+            await page.wait_for_timeout(5000)
+            return
+
+        dd_frame = await _get_dingtalk_frame(page)
+        self._emit_log(f'已定位钉钉 iframe: {dd_frame.url}', 'login')
+
+        await _dismiss_cookie_dialog(dd_frame)
+
+        confirm_task = asyncio.create_task(click_dingtalk_confirm(timeout=30))
+        try:
+            await _click_avatar(dd_frame)
+            await _click_confirm_login(dd_frame)
+            await _click_consent(dd_frame)
+            # 等待页面离开 SSO（不要求进入 wangdian，只要不在 SSO 就行）
+            for _ in range(30):
+                await page.wait_for_timeout(1000)
+                if not is_auth_url(page.url):
+                    break
+        finally:
+            if not confirm_task.done():
+                confirm_task.cancel()
+                try:
+                    await confirm_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
     def _register_wangdian_trigger(self, context):
         if self._response_listener_registered:
             return
@@ -399,25 +436,21 @@ class BackgroundWorker(threading.Thread):
 
                 if is_auth_url(page.url):
                     if 'page.sto.cn' in url:
-                        # page.sto.cn 有独立 session，当前页面已经在 SSO 页，直接登录
-                        self._emit_log(f'page.sto.cn 需要独立登录，执行登录流程', 'login')
+                        # page.sto.cn 有独立 session，SSO 登录后会自动跳转回目标页
+                        # 只需要完成钉钉登录流程，然后等待页面离开 SSO 即可
+                        self._emit_log(f'page.sto.cn 需要独立登录，等待 SSO 完成...', 'login')
                         try:
-                            await login_via_dingtalk(page, skip_navigate=True)
-                            await page.wait_for_timeout(3000)
-                            # 登录后等待自动跳转回目标页
-                            if 'manipulate-center' not in page.url:
-                                await page.goto(url, wait_until='domcontentloaded', timeout=15000)
-                                await page.wait_for_timeout(2000)
+                            await self._do_sso_login_on_page(page)
                             self._emit_log(f'page.sto.cn 登录完成，当前 URL: {page.url}', 'login')
                         except Exception as e:
-                            self._emit_log(f'page.sto.cn 登录失败: {e}', 'login')
+                            self._emit_log(f'page.sto.cn 登录失败: {e}，跳过此页面', 'login')
                             await page.close()
                             continue
                     elif 'market-cod.sto.cn' in url:
-                        # market-cod 有独立 session，当前页面已经在 SSO 页，直接登录
+                        # market-cod 有独立 session，当前页面已经在 SSO 页
                         self._emit_log(f'market-cod 需要独立登录，执行登录流程', 'login')
                         try:
-                            await login_via_dingtalk(page, skip_navigate=True)
+                            await self._do_sso_login_on_page(page)
                             await page.wait_for_timeout(2000)
                             # 登录后跳转到 /cod/home/index，需要再次导航到目标页
                             if 'topayment/siteOrder/list' not in page.url:
@@ -433,7 +466,7 @@ class BackgroundWorker(threading.Thread):
                         # 其他页面（wangdian 子页面等）共享 wangdian session，不应该出现 SSO
                         self._emit_log(f'常驻页面意外跳转到登录页: {url} → {page.url}', 'login')
                         try:
-                            await login_via_dingtalk(page, skip_navigate=True)
+                            await self._do_sso_login_on_page(page)
                             await page.wait_for_timeout(2000)
                             if url not in page.url:
                                 await page.goto(url, wait_until='domcontentloaded', timeout=15000)
@@ -477,7 +510,7 @@ class BackgroundWorker(threading.Thread):
                     if 'page.sto.cn' in url or 'market-cod.sto.cn' in url:
                         self._emit_log(f'独立 session 页面需要重新登录: {url}', 'heartbeat')
                         try:
-                            await login_via_dingtalk(page, skip_navigate=True)
+                            await self._do_sso_login_on_page(page)
                             await page.wait_for_timeout(2000)
                             if url not in page.url:
                                 await page.goto(url, wait_until='domcontentloaded', timeout=15000)
