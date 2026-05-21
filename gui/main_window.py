@@ -166,13 +166,17 @@ class MainWindow(QMainWindow):
             for domain, has_cookie in data['cookie_status'].items():
                 mark = '✓' if has_cookie else '✗'
                 parts.append(f'{domain} {mark}')
-            self._lbl_cookie_status.setText(f'Cookie: {" | ".join(parts)}')
+            self._lbl_cookie_status.setText(f'Cookie 域名: {" | ".join(parts)}')
         if 'report_status' in data:
             parts = []
             for label, info in data['report_status'].items():
-                mark = '✓' if info['ok'] else '✗'
-                parts.append(f'{label} {mark} ({info["time"]})')
-            self._lbl_report_status.setText(f'上报状态: {" | ".join(parts)}')
+                if info['ok']:
+                    parts.append(f'✓ {label}')
+                elif info.get('error') == '未采集到':
+                    parts.append(f'- {label} (未采集)')
+                else:
+                    parts.append(f'✗ {label}')
+            self._lbl_report_status.setText(f'上报状态:\n' + '\n'.join(parts))
         if 'paused' in data and data['paused']:
             self._lbl_next_collect.setText('下次同步：⏸ 已暂停')
             self._lbl_next_heartbeat.setText('下次心跳：⏸ 已暂停')

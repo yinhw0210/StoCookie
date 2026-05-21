@@ -30,22 +30,20 @@ from config import (
     is_auth_url,
     is_logged_in_url,
 )
-from cookie_collector import build_wangdian_kfsd_payload, collect_cookies
+from cookie_collector import build_wangdian_kfsd_payload, collect_cookies, EXPECTED_REPORT_ITEMS
 from cookie_reporter import report_cookies
 from login import login_via_dingtalk, wait_for_wangdian_entry_or_role
 
-COOKIE_DOMAINS = ['finance-mng', 'market-cod', 'finance-fundmanage', 'wutonggateway', 'wangdian']
-
 COOKIE_REPORT_LABELS = {
-    'SESSION=': 'finance-mng',
-    'cod=': 'market-cod',
-    'finance=': 'finance-fundmanage',
-    'spf_sid=': 'wutonggateway(spf_sid)',
-    'stoToken=': 'wutonggateway(stoToken)',
-    'sid_cfo=': 'wutonggateway(sid_cfo)',
-    'WD_SESSION=': 'wutonggateway(WD_SESSION)',
-    'KFSD=': 'wangdian(KFSD)',
-    'CFO_DOWNLOAD': 'wutonggateway(CFO组合)',
+    'SESSION=': 'SESSION (finance-mng)',
+    'cod=': 'cod (market-cod)',
+    'finance=': 'finance (finance-fundmanage)',
+    'spf_sid=': 'spf_sid (wutonggateway)',
+    'stoToken=': 'stoToken (wutonggateway)',
+    'sid_cfo=': 'sid_cfo (wutonggateway)',
+    'WD_SESSION=': 'WD_SESSION (wutonggateway)',
+    'KFSD=': 'KFSD (wangdian全量)',
+    'CFO_DOWNLOAD': 'CFO_DOWNLOAD 组合',
 }
 
 
@@ -547,15 +545,14 @@ class BackgroundWorker(threading.Thread):
         self._emit_log('=== 开始采集上报 ===', 'report')
         try:
             payloads = await collect_cookies(context)
-            self._emit_log(f'Cookie 采集完成: {len(payloads)} 条', 'report')
-
-            all_cookies = await context.cookies()
-            cookie_status = {}
-            for d in COOKIE_DOMAINS:
-                cookie_status[d] = any(d in c.get('domain', '') for c in all_cookies)
+            self._emit_log(f'Cookie 采集完成: {len(payloads)} 条待上报', 'report')
 
             if not payloads:
-                self._emit_status({'sync': '无 Cookie 可上报', 'cookie_status': cookie_status})
+                # 构建完整的未命中状态
+                report_status = {}
+                for item in EXPECTED_REPORT_ITEMS:
+                    report_status[item['label']] = {'ok': False, 'error': '未采集到', 'time': datetime.now().strftime('%H:%M:%S')}
+                self._emit_status({'sync': '无 Cookie 可上报', 'report_status': report_status})
                 self._emit_log('采集到 0 条 Cookie，无数据上报', 'report')
                 return
 
@@ -564,31 +561,38 @@ class BackgroundWorker(threading.Thread):
 
             now_str = datetime.now().strftime('%H:%M:%S')
             report_status = {}
+
             for entry in reports:
                 cookie_str = entry['cookie']
                 label = self._resolve_cookie_label(cookie_str)
                 all_ok = all(r['ok'] for r in entry['results'])
-                report_status[label] = {'ok': all_ok, 'time': now_str}
                 if all_ok:
-                    self._emit_log(f'✓ {label} 上报成功 ({now_str})', 'report')
+                    report_status[label] = {'ok': True, 'time': now_str}
+                    self._emit_log(f'✓ {label} 上报成功', 'report')
                 else:
                     errors = [f'{r["url"]}:{r["error"]}' for r in entry['results'] if not r['ok']]
-                    self._emit_log(f'✗ {label} 上报失败 ({now_str}) → {", ".join(errors)}', 'report')
+                    report_status[label] = {'ok': False, 'error': ', '.join(errors), 'time': now_str}
+                    self._emit_log(f'✗ {label} 上报失败 → {", ".join(errors)}', 'report')
+
+            # 补充未采集到的项目（在 EXPECTED_REPORT_ITEMS 中但不在 payloads 中的）
+            for item in EXPECTED_REPORT_ITEMS:
+                if item['label'] not in report_status:
+                    report_status[item['label']] = {'ok': False, 'error': '未采集到', 'time': now_str}
 
             total_success = sum(1 for v in report_status.values() if v['ok'])
             total_fail = sum(1 for v in report_status.values() if not v['ok'])
+            total_missing = sum(1 for v in report_status.values() if v.get('error') == '未采集到')
 
-            self._emit_status({
-                'cookie_status': cookie_status,
-                'report_status': report_status,
-            })
+            self._emit_status({'report_status': report_status})
 
-            if total_fail > 0:
-                self._emit_status({'sync': f'部分失败 ({now_str}, 成功{total_success}/失败{total_fail})'})
-                self._emit_log(f'=== 上报完成: {len(payloads)}条Cookie, 成功{total_success}/失败{total_fail} ===', 'report')
-            else:
-                self._emit_status({'sync': f'成功 ({now_str}, {len(payloads)}条)'})
-                self._emit_log(f'=== 上报完成: {len(payloads)}条Cookie, 全部成功({total_success}次) ===', 'report')
+            summary_parts = [f'成功{total_success}']
+            if total_fail - total_missing > 0:
+                summary_parts.append(f'失败{total_fail - total_missing}')
+            if total_missing > 0:
+                summary_parts.append(f'未采集{total_missing}')
+
+            self._emit_status({'sync': f'{"/".join(summary_parts)} ({now_str})'})
+            self._emit_log(f'=== 上报完成: {"/".join(summary_parts)} ===', 'report')
         except Exception as e:
             self._emit_status({'sync': f'上报失败: {e}'})
             self._emit_log(f'采集上报异常: {e}', 'report')
@@ -649,8 +653,8 @@ class BackgroundWorker(threading.Thread):
                 return label
         if 'WD_SESSION' in cookie_prefix and 'TSID' in cookie_prefix:
             if 'sid_cfo' in cookie_prefix:
-                return 'wutonggateway(CFO组合)'
-            return 'wutonggateway(WD+TSID组合)'
+                return 'CFO_DOWNLOAD 组合'
+            return 'WD_SESSION+TSID 组合'
         return cookie_prefix[:30]
 
     def trigger_sync(self):
