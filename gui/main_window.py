@@ -42,6 +42,11 @@ class MainWindow(QMainWindow):
         self._lbl_cookie_status.setWordWrap(True)
         layout.addWidget(self._lbl_cookie_status)
 
+        # 上报状态一览
+        self._lbl_report_status = QLabel('上报状态: --')
+        self._lbl_report_status.setWordWrap(True)
+        layout.addWidget(self._lbl_report_status)
+
         # 按钮行 1
         btn_layout1 = QHBoxLayout()
         self._btn_sync = QPushButton('立即同步')
@@ -162,6 +167,12 @@ class MainWindow(QMainWindow):
                 mark = '✓' if has_cookie else '✗'
                 parts.append(f'{domain} {mark}')
             self._lbl_cookie_status.setText(f'Cookie: {" | ".join(parts)}')
+        if 'report_status' in data:
+            parts = []
+            for label, info in data['report_status'].items():
+                mark = '✓' if info['ok'] else '✗'
+                parts.append(f'{label} {mark} ({info["time"]})')
+            self._lbl_report_status.setText(f'上报状态: {" | ".join(parts)}')
         if 'paused' in data and data['paused']:
             self._lbl_next_collect.setText('下次同步：⏸ 已暂停')
             self._lbl_next_heartbeat.setText('下次心跳：⏸ 已暂停')

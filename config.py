@@ -13,23 +13,22 @@ SETTINGS_PATH = os.path.join(BASE_DIR, 'settings.json')
 
 STORAGE_STATE_PATH = os.path.join(STORAGE_DIR, 'state.json')
 
-HEARTBEAT_URLS = [
-    'https://page.sto.cn/ux/manipulate-center/index',
+PERSISTENT_PAGES = [
+    'https://page.sto.cn/ux/manipulate-center/index.html#/',
     'https://front.sto.cn/group/customerCenter#/',
     'https://wangdian.sto.cn/page/fin-center/settlement/new-outbound-settlement',
     'https://wangdian.sto.cn/page/external/hq-fin-center/report/policy/transfer/rebate',
     'https://market-cod.sto.cn/cod/topayment/siteOrder/list',
-    'https://finance-fundmanage.sto.cn/prepaidment/prepaid/common/getBizType.action?showLevel=1',
+    'https://wangdian.sto.cn/index',
 ]
 
-# 采集前需要访问的页面（确保浏览器产生对应域名的 Cookie）
-COOKIE_SEED_URLS = [
-    'https://finance-mng.sto.cn/',
-    'https://market-cod.sto.cn/cod/topayment/siteOrder/list',
-    'https://finance-fundmanage.sto.cn/prepaidment/prepaid/common/getBizType.action?showLevel=1',
-    'https://wutonggateway.sto.cn/',
-    'https://wangdian.sto.cn/page/fin-center/settlement/new-outbound-settlement',
-]
+FINANCE_FUNDMANAGE_URL = 'https://finance-fundmanage.sto.cn/prepaidment/prepaid/common/getBizType.action?showLevel=1'
+
+WANGDIAN_NAV_SELECTOR = '.navigation-list-item-content'
+WANGDIAN_ANNOUNCEMENT_CLOSE_SELECTOR = 'a.next-dialog-close'
+WANGDIAN_SEARCH_INPUT_SELECTOR = '.headerSearch-dSmAC input[role="combobox"]'
+WANGDIAN_SEARCH_FIRST_RESULT_SELECTOR = '.navigation-list-item-content'
+WANGDIAN_SEARCH_KEYWORDS = ['结算账户交易明细', '网点账单']
 
 COOKIE_RULES = [
     ('finance-mng.sto.cn', 'SESSION', lambda n, v: f'{n}={v}'),
@@ -87,5 +86,5 @@ def is_auth_url(url: str) -> bool:
 def is_logged_in_url(url: str) -> bool:
     return url.startswith(WANGDIAN_INDEX_URL) or url.rstrip('/') == LOGIN_ENTRY_URL
 
-COLLECT_INTERVAL_MINUTES = 360
-HEARTBEAT_INTERVAL_MINUTES = 20
+COLLECT_INTERVAL_MINUTES = 1
+HEARTBEAT_INTERVAL_MINUTES = 1

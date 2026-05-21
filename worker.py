@@ -11,23 +11,42 @@ from PySide6.QtCore import QObject, Signal
 from config import (
     BROWSERS_DIR,
     COLLECT_INTERVAL_MINUTES,
+    FINANCE_FUNDMANAGE_URL,
     HEARTBEAT_INTERVAL_MINUTES,
     LOG_DIR,
+    PERSISTENT_PAGES,
     SETTINGS_PATH,
     SSO_URL,
     STORAGE_DIR,
     STORAGE_STATE_PATH,
+    WANGDIAN_ANNOUNCEMENT_CLOSE_SELECTOR,
+    WANGDIAN_INDEX_URL,
     WANGDIAN_MAP_AREA_DETAIL_URL_MARKER,
+    WANGDIAN_NAV_SELECTOR,
+    WANGDIAN_SEARCH_FIRST_RESULT_SELECTOR,
+    WANGDIAN_SEARCH_INPUT_SELECTOR,
+    WANGDIAN_SEARCH_KEYWORDS,
     WANGDIAN_TRIGGER_INTERVAL_SECONDS,
     is_auth_url,
     is_logged_in_url,
 )
-from cookie_collector import build_wangdian_kfsd_payload, collect_cookies, visit_cookie_seed_pages
+from cookie_collector import build_wangdian_kfsd_payload, collect_cookies
 from cookie_reporter import report_cookies
-from heartbeat import heartbeat
 from login import login_via_dingtalk, wait_for_wangdian_entry_or_role
 
 COOKIE_DOMAINS = ['finance-mng', 'market-cod', 'finance-fundmanage', 'wutonggateway', 'wangdian']
+
+COOKIE_REPORT_LABELS = {
+    'SESSION=': 'finance-mng',
+    'cod=': 'market-cod',
+    'finance=': 'finance-fundmanage',
+    'spf_sid=': 'wutonggateway(spf_sid)',
+    'stoToken=': 'wutonggateway(stoToken)',
+    'sid_cfo=': 'wutonggateway(sid_cfo)',
+    'WD_SESSION=': 'wutonggateway(WD_SESSION)',
+    'KFSD=': 'wangdian(KFSD)',
+    'CFO_DOWNLOAD': 'wutonggateway(CFO组合)',
+}
 
 
 def _load_settings() -> dict:
@@ -57,6 +76,7 @@ class BackgroundWorker(threading.Thread):
         self._login_page = None
         self._last_wangdian_trigger = 0.0
         self._response_listener_registered = False
+        self._persistent_pages: dict[str, object] = {}
 
         settings = _load_settings()
         self._collect_interval = settings.get('collect_interval', COLLECT_INTERVAL_MINUTES)
@@ -105,14 +125,14 @@ class BackgroundWorker(threading.Thread):
 
             login_ok = await self._ensure_logged_in(context, 'startup')
             if login_ok:
+                await self._open_persistent_pages(context)
                 self._emit_status({'sync': '等待同步'})
-                self._emit_log('启动 SSO 校验完成，等待手动或定时 Cookie 同步', 'report')
+                self._emit_log('启动 SSO 校验完成，常驻页面已打开，等待定时 Cookie 同步', 'report')
             else:
                 self._emit_status({'sync': '等待登录'})
                 self._emit_log('启动登录未完成，跳过首次 Cookie 同步', 'report')
 
-            last_collect = time.time()
-            last_heartbeat = time.time()
+            last_sync = time.time()
 
             while not self._stop_event.is_set():
                 if self._paused:
@@ -123,31 +143,24 @@ class BackgroundWorker(threading.Thread):
                 if self._manual_login_event.is_set():
                     self._manual_login_event.clear()
                     await self._do_login(context)
+                    await self._open_persistent_pages(context)
 
                 if self._manual_sync_event.is_set():
                     self._manual_sync_event.clear()
-                    await self._do_collect(context)
-                    last_collect = time.time()
+                    await self._do_sync_cycle(context)
+                    last_sync = time.time()
 
                 now = time.time()
-                collect_due = (now - last_collect) >= self._collect_interval * 60
-                heartbeat_due = (now - last_heartbeat) >= self._heartbeat_interval * 60
+                sync_due = (now - last_sync) >= self._collect_interval * 60
 
-                if collect_due:
-                    await self._do_collect(context)
-                    last_collect = time.time()
+                if sync_due:
+                    await self._do_sync_cycle(context)
+                    last_sync = time.time()
 
-                if heartbeat_due:
-                    alive = await self._do_heartbeat(context)
-                    if not alive:
-                        await self._do_login(context)
-                    last_heartbeat = time.time()
-
-                next_collect = max(0, self._collect_interval * 60 - (time.time() - last_collect))
-                next_heartbeat = max(0, self._heartbeat_interval * 60 - (time.time() - last_heartbeat))
+                next_sync = max(0, self._collect_interval * 60 - (time.time() - last_sync))
                 self._emit_status({
-                    'next_collect': int(next_collect),
-                    'next_heartbeat': int(next_heartbeat),
+                    'next_collect': int(next_sync),
+                    'next_heartbeat': int(next_sync),
                     'paused': False,
                 })
 
@@ -290,87 +303,187 @@ class BackgroundWorker(threading.Thread):
             return False
         return True
 
-    async def _do_collect(self, context, sso_checked: bool = False):
-        self._emit_status({'sync': '同步中...'})
+    async def _dismiss_announcement(self, page):
         try:
-            if not sso_checked:
-                login_ok = await self._ensure_logged_in(context, 'collect')
-                if not login_ok:
-                    self._emit_status({'sync': '等待登录'})
-                    self._emit_log('登录未完成，跳过本轮 Cookie 同步', 'report')
-                    return
+            close_btn = page.locator(WANGDIAN_ANNOUNCEMENT_CLOSE_SELECTOR).first
+            if await close_btn.is_visible(timeout=3000):
+                await close_btn.click()
+                await page.wait_for_timeout(500)
+                self._emit_log('公告弹窗已关闭', 'general')
+        except Exception:
+            pass
 
-            seed_results = await visit_cookie_seed_pages(context)
-            seed_success = sum(1 for r in seed_results if r['ok'])
-            seed_fail = len(seed_results) - seed_success
-            self._emit_log(
-                f'种子页面访问完成: 成功{seed_success}/失败{seed_fail}，继续采集已有 Cookie',
-                'report',
-            )
-            for result in seed_results:
-                if result['ok']:
-                    self._emit_log(f'种子页成功: {result["url"]} -> {result["final_url"]}', 'report')
-                else:
-                    self._emit_log(
-                        f'种子页跳过: {result["url"]} -> {result["reason"] or "未知原因"}',
-                        'report',
+    async def _search_and_click(self, page, keyword: str):
+        try:
+            search_input = page.locator(WANGDIAN_SEARCH_INPUT_SELECTOR).first
+            await search_input.click(timeout=5000)
+            await search_input.fill('')
+            await search_input.fill(keyword)
+            await page.wait_for_timeout(1500)
+            first_result = page.locator(WANGDIAN_SEARCH_FIRST_RESULT_SELECTOR).first
+            await first_result.click(timeout=5000)
+            await page.wait_for_timeout(2000)
+            self._emit_log(f'搜索「{keyword}」并点击第一个结果完成', 'general')
+            return True
+        except Exception as e:
+            self._emit_log(f'搜索「{keyword}」失败: {e}', 'general')
+            return False
+
+    async def _handle_wangdian_index(self, context, page):
+        await self._dismiss_announcement(page)
+
+        # 搜索「结算账户交易明细」触发 cookie 生成
+        await self._search_and_click(page, WANGDIAN_SEARCH_KEYWORDS[0])
+
+        # 新开标签页打开 finance-fundmanage
+        try:
+            fm_page = await context.new_page()
+            await fm_page.goto(FINANCE_FUNDMANAGE_URL, wait_until='domcontentloaded', timeout=15000)
+            await fm_page.wait_for_timeout(2000)
+            self._persistent_pages[FINANCE_FUNDMANAGE_URL] = fm_page
+            self._emit_log(f'常驻页面已打开: {FINANCE_FUNDMANAGE_URL}', 'general')
+        except Exception as e:
+            self._emit_log(f'finance-fundmanage 页面打开失败: {e}', 'general')
+
+        # 回到 wangdian/index 搜索「网点账单」
+        await page.goto(WANGDIAN_INDEX_URL, wait_until='domcontentloaded', timeout=15000)
+        await page.wait_for_timeout(2000)
+        await self._dismiss_announcement(page)
+        await self._search_and_click(page, WANGDIAN_SEARCH_KEYWORDS[1])
+
+    async def _open_persistent_pages(self, context):
+        self._emit_log('开始打开常驻页面...', 'general')
+        for url in PERSISTENT_PAGES:
+            if url in self._persistent_pages:
+                page = self._persistent_pages[url]
+                if not page.is_closed():
+                    continue
+            try:
+                page = await context.new_page()
+                await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+                await page.wait_for_timeout(2000)
+                if is_auth_url(page.url):
+                    self._emit_log(f'常驻页面跳转到登录页，等待登录完成后重新打开: {url}', 'general')
+                    await page.wait_for_url(
+                        lambda u: not is_auth_url(u), timeout=120000
                     )
+                    await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+                    await page.wait_for_timeout(2000)
+                if 'wangdian.sto.cn/index' in url:
+                    await self._handle_wangdian_index(context, page)
+                self._persistent_pages[url] = page
+                self._emit_log(f'常驻页面已打开: {url}', 'general')
+            except Exception as e:
+                self._emit_log(f'常驻页面打开失败: {url} -> {e}', 'general')
+        await context.storage_state(path=STORAGE_STATE_PATH)
+        self._emit_log(f'常驻页面打开完成，共 {len(self._persistent_pages)} 个', 'general')
+
+    async def _reload_persistent_pages(self, context) -> bool:
+        session_expired = False
+        for url, page in list(self._persistent_pages.items()):
+            try:
+                if page.is_closed():
+                    page = await context.new_page()
+                    await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+                    self._persistent_pages[url] = page
+                    self._emit_log(f'常驻页面重新打开: {url}', 'heartbeat')
+                else:
+                    await page.reload(wait_until='domcontentloaded', timeout=15000)
+
+                await page.wait_for_timeout(2000)
+
+                if is_auth_url(page.url):
+                    self._emit_log(f'常驻页面 reload 后跳转到登录页: {url}', 'heartbeat')
+                    session_expired = True
+                    break
+
+                if 'wangdian.sto.cn/index' in url:
+                    await self._dismiss_announcement(page)
+            except Exception as e:
+                self._emit_log(f'常驻页面 reload 失败: {url} -> {e}', 'heartbeat')
+                try:
+                    page = await context.new_page()
+                    await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+                    self._persistent_pages[url] = page
+                except Exception:
+                    pass
+
+        if not session_expired:
+            await context.storage_state(path=STORAGE_STATE_PATH)
+        return not session_expired
+
+    async def _do_sync_cycle(self, context):
+        self._emit_status({'sync': '同步中...', 'heartbeat': '检测中...'})
+        try:
+            need_login = await self._check_session(context)
+            if need_login:
+                self._emit_status({'heartbeat': 'Session 过期'})
+                self._emit_log('同步前检测: Session 过期，需重新登录', 'heartbeat')
+                await self._do_login(context)
+                await self._open_persistent_pages(context)
+                return
+
+            alive = await self._reload_persistent_pages(context)
+            if not alive:
+                self._emit_status({'heartbeat': 'Session 过期'})
+                self._emit_log('reload 检测到 Session 过期，重新登录', 'heartbeat')
+                await self._do_login(context)
+                await self._open_persistent_pages(context)
+                return
+
+            self._emit_status({'heartbeat': '正常'})
+            self._emit_log('常驻页面 reload 完成，心跳正常', 'heartbeat')
 
             payloads = await collect_cookies(context)
             self._emit_log(f'Cookie payload 生成完成: {len(payloads)} 条', 'report')
 
-            # 发送 Cookie 状态
             all_cookies = await context.cookies()
             cookie_status = {}
             for d in COOKIE_DOMAINS:
                 cookie_status[d] = any(d in c.get('domain', '') for c in all_cookies)
-            self._emit_status({'cookie_status': cookie_status})
-            status_text = ' | '.join(f'{d}={"有" if ok else "无"}' for d, ok in cookie_status.items())
-            self._emit_log(f'Cookie 域名状态: {status_text}', 'report')
 
             if not payloads:
-                self._emit_status({'sync': '无 Cookie 可上报'})
+                self._emit_status({'sync': '无 Cookie 可上报', 'cookie_status': cookie_status})
                 self._emit_log('采集到 0 条 Cookie，无数据上报', 'report')
                 return
 
             reports = await report_cookies(payloads)
 
-            # 逐条输出上报详情
-            total_success = 0
-            total_fail = 0
+            now_str = datetime.now().strftime('%H:%M:%S')
+            report_status = {}
             for entry in reports:
-                results_str = ' / '.join(
-                    f'{r["url"]} ✓' if r['ok'] else f'{r["url"]} ✗({r["error"]})'
-                    for r in entry['results']
-                )
-                self._emit_log(f'{entry["cookie"]}... → {results_str}', 'report')
-                for r in entry['results']:
-                    if r['ok']:
-                        total_success += 1
-                    else:
-                        total_fail += 1
+                cookie_str = entry['cookie']
+                label = self._resolve_cookie_label(cookie_str)
+                all_ok = all(r['ok'] for r in entry['results'])
+                report_status[label] = {'ok': all_ok, 'time': now_str}
+                if all_ok:
+                    self._emit_log(f'✓ {label} 上报成功 ({now_str})', 'report')
+                else:
+                    errors = [f'{r["url"]}:{r["error"]}' for r in entry['results'] if not r['ok']]
+                    self._emit_log(f'✗ {label} 上报失败 ({now_str}) → {", ".join(errors)}', 'report')
 
-            now = datetime.now().strftime('%H:%M:%S')
+            total_success = sum(1 for v in report_status.values() if v['ok'])
+            total_fail = sum(1 for v in report_status.values() if not v['ok'])
+
+            self._emit_status({
+                'cookie_status': cookie_status,
+                'report_status': report_status,
+            })
+
             if total_fail > 0:
-                self._emit_status({'sync': f'部分失败 ({now}, 成功{total_success}/失败{total_fail})'})
+                self._emit_status({'sync': f'部分失败 ({now_str}, 成功{total_success}/失败{total_fail})'})
                 self._emit_log(f'上报完成: {len(payloads)}条Cookie, 成功{total_success}/失败{total_fail}', 'report')
             else:
-                self._emit_status({'sync': f'成功 ({now}, {len(payloads)}条)'})
+                self._emit_status({'sync': f'成功 ({now_str}, {len(payloads)}条)'})
                 self._emit_log(f'上报完成: {len(payloads)}条Cookie, 全部成功({total_success}次)', 'report')
         except Exception as e:
             self._emit_status({'sync': f'失败: {e}'})
-            self._emit_log(f'Cookie 同步异常: {e}', 'report')
+            self._emit_log(f'同步周期异常: {e}', 'report')
 
     async def _do_heartbeat(self, context) -> bool:
         self._emit_status({'heartbeat': '检测中...'})
         try:
-            need_login = await self._check_session(context)
-            if need_login:
-                self._emit_status({'heartbeat': 'Session 过期'})
-                self._emit_log('心跳前置检测: Session 未完成，跳过业务页保活', 'heartbeat')
-                return False
-
-            alive = await heartbeat(context)
+            alive = await self._reload_persistent_pages(context)
             if alive:
                 self._emit_status({'heartbeat': '正常'})
                 self._emit_log('心跳正常', 'heartbeat')
@@ -382,6 +495,16 @@ class BackgroundWorker(threading.Thread):
             self._emit_status({'heartbeat': f'异常: {e}'})
             self._emit_log(f'心跳异常: {e}', 'heartbeat')
             return False
+
+    def _resolve_cookie_label(self, cookie_prefix: str) -> str:
+        for prefix, label in COOKIE_REPORT_LABELS.items():
+            if cookie_prefix.startswith(prefix):
+                return label
+        if 'WD_SESSION' in cookie_prefix and 'TSID' in cookie_prefix:
+            if 'sid_cfo' in cookie_prefix:
+                return 'wutonggateway(CFO组合)'
+            return 'wutonggateway(WD+TSID组合)'
+        return cookie_prefix[:30]
 
     def trigger_sync(self):
         self._manual_sync_event.set()
