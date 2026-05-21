@@ -699,7 +699,7 @@ class BackgroundWorker(threading.Thread):
         await self._do_pdd_collect_and_report()
 
     async def _do_pdd_sync_cycle(self):
-        """PDD 的采集-上报周期"""
+        """PDD 的采集-上报周期：常驻页面 reload 检测 session + 采集 cookie"""
         if not self._pdd:
             return
         try:
@@ -711,6 +711,8 @@ class BackgroundWorker(threading.Thread):
                     self._emit_log('PDD: 登录失败，本次同步跳过', 'pdd')
                     self._emit_status({'pdd_status': {'SUB_PASS_ID (PDD)': {'ok': False, 'error': '登录失败', 'time': datetime.now().strftime('%H:%M:%S')}}})
                     return
+                # 登录成功后页面已在目标页，等待 API 请求完成
+                await asyncio.sleep(3)
 
             await self._do_pdd_collect_and_report()
         except Exception as e:

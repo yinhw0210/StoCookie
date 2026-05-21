@@ -32,18 +32,22 @@ class PddSiteDriver:
             self._emit_log('PDD: 创建新 Context', 'pdd')
         return self._context
 
+    async def ensure_page(self):
+        """确保常驻页面存在且打开，不存在则新建并导航到目标页。"""
+        if self._page and not self._page.is_closed():
+            return
+        self._page = await self._context.new_page()
+        self._emit_log(f'PDD: 新开常驻页面，导航到 {PDD_TARGET_URL}', 'pdd')
+        await self._page.goto(PDD_TARGET_URL, wait_until='domcontentloaded', timeout=20000)
+        await self._page.wait_for_timeout(3000)
+
     async def check_session(self) -> bool:
         """检测 session 是否有效。返回 True=有效，False=过期。"""
         try:
-            if self._page and not self._page.is_closed():
-                self._emit_log('PDD: 复用已有页面检测 Session (reload)', 'pdd')
-                await self._page.reload(wait_until='domcontentloaded', timeout=20000)
-                await self._page.wait_for_timeout(2000)
-            else:
-                self._page = await self._context.new_page()
-                self._emit_log(f'PDD: 新开页面访问 {PDD_TARGET_URL}', 'pdd')
-                await self._page.goto(PDD_TARGET_URL, wait_until='domcontentloaded', timeout=20000)
-                await self._page.wait_for_timeout(2000)
+            await self.ensure_page()
+            self._emit_log('PDD: 复用常驻页面检测 Session (reload)', 'pdd')
+            await self._page.reload(wait_until='domcontentloaded', timeout=20000)
+            await self._page.wait_for_timeout(3000)
 
             url = self._page.url
             if '/auth/login' in url:
@@ -105,7 +109,7 @@ class PddSiteDriver:
         return False
 
     async def collect(self) -> list[str]:
-        """采集 SUB_PASS_ID cookie。"""
+        """采集 SUB_PASS_ID cookie。调用前需确保页面已 reload/导航过。"""
         all_cookies = await self._context.cookies()
         payloads = []
 
