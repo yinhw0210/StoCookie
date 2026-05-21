@@ -26,8 +26,8 @@ FINANCE_FUNDMANAGE_URL = 'https://finance-fundmanage.sto.cn/prepaidment/prepaid/
 
 WANGDIAN_NAV_SELECTOR = '.navigation-list-item-content'
 WANGDIAN_ANNOUNCEMENT_CLOSE_SELECTOR = 'a.next-dialog-close'
-WANGDIAN_SEARCH_INPUT_SELECTOR = '.headerSearch-dSmAC input[role="combobox"]'
-WANGDIAN_SEARCH_FIRST_RESULT_SELECTOR = '.navigation-list-item-content'
+WANGDIAN_SEARCH_INPUT_SELECTOR = '.searchMenu-27XOB input[placeholder="支持快捷检索菜单"]'
+WANGDIAN_SEARCH_FIRST_RESULT_SELECTOR = '.searchMenu-27XOB .navigation-list-item-content'
 WANGDIAN_SEARCH_KEYWORDS = ['结算账户交易明细', '网点账单']
 
 COOKIE_RULES = [

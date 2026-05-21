@@ -363,12 +363,19 @@ class BackgroundWorker(threading.Thread):
                 await page.goto(url, wait_until='domcontentloaded', timeout=15000)
                 await page.wait_for_timeout(2000)
                 if is_auth_url(page.url):
-                    self._emit_log(f'常驻页面跳转到登录页，等待登录完成后重新打开: {url}', 'general')
-                    await page.wait_for_url(
-                        lambda u: not is_auth_url(u), timeout=120000
-                    )
-                    await page.goto(url, wait_until='domcontentloaded', timeout=15000)
-                    await page.wait_for_timeout(2000)
+                    self._emit_log(f'常驻页面跳转到登录页，执行登录流程: {url}', 'general')
+                    try:
+                        await login_via_dingtalk(page)
+                        await page.wait_for_timeout(2000)
+                    except Exception as e:
+                        self._emit_log(f'常驻页面登录失败: {url} -> {e}', 'general')
+                        await page.close()
+                        continue
+                    # 登录后检查是否回到了目标页，没有则手动导航
+                    if url not in page.url:
+                        self._emit_log(f'登录后未重定向到目标页，手动导航: {url}', 'general')
+                        await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+                        await page.wait_for_timeout(2000)
                 if 'wangdian.sto.cn/index' in url:
                     await self._handle_wangdian_index(context, page)
                 self._persistent_pages[url] = page
