@@ -648,13 +648,14 @@ class BackgroundWorker(threading.Thread):
             return False
 
     def _resolve_cookie_label(self, cookie_prefix: str) -> str:
+        # 组合规则优先判断（避免被单条规则的前缀先匹配走）
+        if 'CFO_DOWNLOAD' in cookie_prefix:
+            return 'CFO_DOWNLOAD 组合'
+        if 'WD_SESSION' in cookie_prefix and 'TSID' in cookie_prefix:
+            return 'WD_SESSION+TSID 组合'
         for prefix, label in COOKIE_REPORT_LABELS.items():
             if cookie_prefix.startswith(prefix):
                 return label
-        if 'WD_SESSION' in cookie_prefix and 'TSID' in cookie_prefix:
-            if 'sid_cfo' in cookie_prefix:
-                return 'CFO_DOWNLOAD 组合'
-            return 'WD_SESSION+TSID 组合'
         return cookie_prefix[:30]
 
     def trigger_sync(self):
