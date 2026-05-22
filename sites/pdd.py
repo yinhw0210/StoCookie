@@ -24,7 +24,7 @@ class PddSiteDriver:
         self._emit_log = emit_log or (lambda msg, cat: logger.info(msg))
 
     async def create_context(self, browser: Browser) -> BrowserContext:
-        # 伪装真实浏览器指纹，避免 PDD 风控检测 Playwright 低版本 Chromium
+        # 伪装真实浏览器指纹，避免 PDD 风控检测
         context_opts = {
             'user_agent': (
                 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -39,8 +39,14 @@ class PddSiteDriver:
             self._context = await browser.new_context(**context_opts)
             self._emit_log('PDD: 创建新 Context', 'pdd')
 
-        # 注入 client hints 覆盖 sec-ch-ua
+        # 隐藏 Playwright 自动化特征
         await self._context.add_init_script("""
+            // 隐藏 webdriver 标志
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined,
+            });
+
+            // 覆盖 client hints
             Object.defineProperty(navigator, 'userAgentData', {
                 get: () => ({
                     brands: [
@@ -52,6 +58,28 @@ class PddSiteDriver:
                     platform: 'Windows',
                 }),
             });
+
+            // 隐藏 Playwright 注入的 __playwright 等属性
+            delete window.__playwright;
+            delete window.__pw_manual;
+
+            // 伪装 plugins 数组（真实浏览器有插件，自动化浏览器为空）
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5],
+            });
+
+            // 伪装 languages
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['zh-CN', 'zh', 'en'],
+            });
+
+            // 隐藏 chrome.runtime（Playwright 不注入，但检测脚本可能检查其缺失）
+            if (!window.chrome) {
+                window.chrome = {};
+            }
+            if (!window.chrome.runtime) {
+                window.chrome.runtime = {};
+            }
         """)
         return self._context
 
