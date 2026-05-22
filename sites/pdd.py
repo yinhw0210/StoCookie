@@ -24,12 +24,35 @@ class PddSiteDriver:
         self._emit_log = emit_log or (lambda msg, cat: logger.info(msg))
 
     async def create_context(self, browser: Browser) -> BrowserContext:
+        # 伪装真实浏览器指纹，避免 PDD 风控检测 Playwright 低版本 Chromium
+        context_opts = {
+            'user_agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                '(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0'
+            ),
+        }
         if os.path.exists(PDD_STORAGE_PATH):
-            self._context = await browser.new_context(storage_state=PDD_STORAGE_PATH)
+            context_opts['storage_state'] = PDD_STORAGE_PATH
+            self._context = await browser.new_context(**context_opts)
             self._emit_log('PDD: 恢复已有 Session', 'pdd')
         else:
-            self._context = await browser.new_context()
+            self._context = await browser.new_context(**context_opts)
             self._emit_log('PDD: 创建新 Context', 'pdd')
+
+        # 注入 client hints 覆盖 sec-ch-ua
+        await self._context.add_init_script("""
+            Object.defineProperty(navigator, 'userAgentData', {
+                get: () => ({
+                    brands: [
+                        {brand: 'Chromium', version: '148'},
+                        {brand: 'Microsoft Edge', version: '148'},
+                        {brand: 'Not/A)Brand', version: '99'},
+                    ],
+                    mobile: false,
+                    platform: 'Windows',
+                }),
+            });
+        """)
         return self._context
 
     async def ensure_page(self):
