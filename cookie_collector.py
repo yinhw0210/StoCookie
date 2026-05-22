@@ -12,11 +12,12 @@ from config import (
 def _domain_match(cookie_domain: str, rule_domain: str) -> bool:
     """
     模拟浏览器 cookie domain 匹配逻辑：
-    - rule_domain 以 '.' 开头（如 '.sto.cn'）：cookie_domain 必须精确等于它
-    - 否则：cookie_domain 包含 rule_domain 即可（如 'finance-mng.sto.cn' in '.finance-mng.sto.cn'）
+    - rule_domain 以 '.' 开头（如 '.sto.cn'）：cookie_domain 精确等于它，
+      或者 cookie_domain 以该后缀结尾（如 'wutonggateway.sto.cn' 匹配 '.sto.cn'）
+    - 否则：cookie_domain 包含 rule_domain 即可
     """
     if rule_domain.startswith('.'):
-        return cookie_domain == rule_domain
+        return cookie_domain == rule_domain or cookie_domain.endswith(rule_domain)
     return rule_domain in cookie_domain
 
 # 插件上报的完整类型列表（用于 GUI 展示逐条状态）
@@ -65,7 +66,7 @@ async def collect_cookies(context: BrowserContext) -> list[str]:
             c = matched[0]
             payload = fmt(c['name'], c['value'])
             payloads.append(payload)
-            logger.info(f'✓ 命中规则: {name}@{domain} → payload={payload[:80]}')
+            logger.info(f'[采集] ✓ 命中规则: {name}@{domain} → payload明文({len(payload)}字符): {payload}')
         else:
             domain_cookies = [c for c in all_cookies if _domain_match(c.get('domain', ''), domain)]
             if domain_cookies:
@@ -88,7 +89,10 @@ async def collect_cookies(context: BrowserContext) -> list[str]:
                 ordered.append(next(c for c in target if c['name'] == n))
             payload = rule['format'](ordered)
             payloads.append(payload)
-            logger.info(f'✓ 命中组合规则: {",".join(rule["names"])}@{rule["domain"]} → payload={payload[:80]}')
+            logger.info(
+                f'[采集] ✓ 命中组合规则: {",".join(rule["names"])}@{rule["domain"]} '
+                f'→ payload明文({len(payload)}字符): {payload}'
+            )
         else:
             logger.warning(f'✗ 未命中组合规则: {",".join(rule["names"])}@{rule["domain"]}，缺少: {",".join(missing_names)}')
 
@@ -96,9 +100,14 @@ async def collect_cookies(context: BrowserContext) -> list[str]:
     kfsd_payload = build_wangdian_kfsd_payload(all_cookies)
     if kfsd_payload:
         payloads.append(kfsd_payload)
-        logger.info(f'✓ 命中 KFSD: wangdian 全量 Cookie ({kfsd_payload[:80]}...)')
+        logger.info(
+            f'[采集] ✓ 命中 KFSD: wangdian 全量 Cookie '
+            f'payload明文({len(kfsd_payload)}字符): {kfsd_payload}'
+        )
     else:
         logger.warning('✗ 未命中 KFSD: Context 中无 wangdian.sto.cn 的 Cookie')
 
-    logger.info(f'采集结果: {len(payloads)} 条 payload 待上报')
+    logger.info(f'[采集] 结束，共 {len(payloads)} 条 payload 待上报')
+    for i, p in enumerate(payloads, 1):
+        logger.info(f'[采集] 待上报清单 {i}/{len(payloads)}: {p}')
     return payloads

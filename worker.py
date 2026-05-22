@@ -536,17 +536,48 @@ class BackgroundWorker(threading.Thread):
                     await self._dismiss_announcement(page)
             except Exception as e:
                 self._emit_log(f'常驻页面 reload 失败: {url} -> {e}', 'heartbeat')
-                try:
-                    page = await context.new_page()
-                    await page.goto(url, wait_until='domcontentloaded', timeout=15000)
-                    self._persistent_pages[url] = page
-                    self._emit_log(f'常驻页面重新打开成功: {url}', 'heartbeat')
-                except Exception as e2:
-                    self._emit_log(f'常驻页面重新打开也失败: {url} -> {e2}', 'heartbeat')
+                # finance-fundmanage 需要通过 wangdian 搜索入口打开，不能直接 goto
+                if FINANCE_FUNDMANAGE_URL in url:
+                    self._emit_log(f'finance-fundmanage 需要通过搜索入口重新打开', 'heartbeat')
+                    await self._reopen_finance_fundmanage(context)
+                else:
+                    try:
+                        page = await context.new_page()
+                        await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+                        self._persistent_pages[url] = page
+                        self._emit_log(f'常驻页面重新打开成功: {url}', 'heartbeat')
+                    except Exception as e2:
+                        self._emit_log(f'常驻页面重新打开也失败: {url} -> {e2}', 'heartbeat')
 
         if not session_expired:
             await context.storage_state(path=STORAGE_STATE_PATH)
         return not session_expired
+
+    async def _reopen_finance_fundmanage(self, context):
+        """通过 wangdian/index 搜索「结算账户交易明细」后打开 finance-fundmanage 页面"""
+        try:
+            wangdian_page = self._persistent_pages.get(WANGDIAN_INDEX_URL)
+            if not wangdian_page or wangdian_page.is_closed():
+                wangdian_page = await context.new_page()
+                await wangdian_page.goto(WANGDIAN_INDEX_URL, wait_until='domcontentloaded', timeout=15000)
+                await wangdian_page.wait_for_timeout(2000)
+                self._persistent_pages[WANGDIAN_INDEX_URL] = wangdian_page
+
+            await self._dismiss_announcement(wangdian_page)
+            await self._search_and_click(wangdian_page, WANGDIAN_SEARCH_KEYWORDS[0])
+
+            # 关闭旧的 finance-fundmanage 页面
+            old_page = self._persistent_pages.get(FINANCE_FUNDMANAGE_URL)
+            if old_page and not old_page.is_closed():
+                await old_page.close()
+
+            fm_page = await context.new_page()
+            await fm_page.goto(FINANCE_FUNDMANAGE_URL, wait_until='domcontentloaded', timeout=15000)
+            await fm_page.wait_for_timeout(2000)
+            self._persistent_pages[FINANCE_FUNDMANAGE_URL] = fm_page
+            self._emit_log(f'finance-fundmanage 通过搜索入口重新打开成功', 'heartbeat')
+        except Exception as e:
+            self._emit_log(f'finance-fundmanage 通过搜索入口重新打开失败: {e}', 'heartbeat')
 
     async def _do_collect_and_report(self, context):
         """仅执行 Cookie 采集和上报，不做 session 检测和 reload"""
