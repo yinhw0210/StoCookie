@@ -340,7 +340,7 @@ class BackgroundWorker(threading.Thread):
                 return
 
             self._emit_log(f'mapAreaDetail 生成 KFSD payload: {payload[:80]}...', 'report')
-            reports = await report_cookies([payload])
+            reports = await report_cookies([payload], emit_log=self._emit_log)
             total_success = sum(1 for entry in reports for r in entry['results'] if r['ok'])
             total_fail = sum(1 for entry in reports for r in entry['results'] if not r['ok'])
             for entry in reports:
@@ -596,7 +596,7 @@ class BackgroundWorker(threading.Thread):
                 return
 
             self._emit_log(f'开始上报 {len(payloads)} 条 Cookie...', 'report')
-            reports = await report_cookies(payloads)
+            reports = await report_cookies(payloads, emit_log=self._emit_log)
 
             now_str = datetime.now().strftime('%H:%M:%S')
             report_status = {}
@@ -759,7 +759,7 @@ class BackgroundWorker(threading.Thread):
             self._emit_status({'pdd_status': {'SUB_PASS_ID (PDD)': {'ok': False, 'error': '未采集到', 'time': now_str}}})
             return
 
-        reports = await report_cookies(payloads)
+        reports = await report_cookies(payloads, emit_log=self._emit_log, log_category='pdd')
         for entry in reports:
             all_ok = all(r['ok'] for r in entry['results'])
             if all_ok:

@@ -1,0 +1,79 @@
+chrome.alarms.create("cookieTimer", {
+  periodInMinutes: 1 // 每1分钟执行一次
+});
+chrome.browserAction.onClicked.addListener(function(tab) {
+  // 当扩展图标被点击时，向当前活动标签页注入脚本
+  chrome.tabs.executeScript(
+    tab.id,
+    {
+      file: 'contentScript.js'
+    },
+    function() {
+      if (chrome.runtime.lastError) {
+        console.error('注入脚本时出错: ' + chrome.runtime.lastError.message);
+      }
+    }
+  );
+});
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name == "cookieTimer") {
+    chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+      var url = 'https://wutonggateway.sto.cn';
+      chrome.cookies.getAll({url: url}, function(cookies) {
+        let cookiesText = '';
+        for (var i = 0; i < cookies.length; i++) {
+          var cookie = cookies[i];
+          //console.info('cookieName: ', cookie.name);
+          //console.info('cookieValue: ', cookie.value);
+          if(cookie.name == 'spf_sid') {
+            cookiesText += cookie.name + '=' + cookie.value + (i < cookies.length - 1 ? '; ' : '');
+            callApi(cookiesText);
+            console.info('send cookies: ', cookiesText);
+          }
+        }
+      });
+    });
+  }
+});
+function callApi(userId) {
+  const urlsit = `https://lysto.com.cn/s/v1/normandy/api/controller/cust/netManager/settingCookie?cookie=${encodeURIComponent(userId)}`; // 使用模板字符串动态构建URL，并对参数进行编码
+
+  const options = {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json', // 根据实际情况调整，如果API不需要特定类型，这行可能不需要
+    },
+  };
+
+  fetch(url, options)
+    .then(response => {
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      return response.json(); // 假设响应是JSON格式
+    })
+    .then(data => {
+      console.log('Success:', data);
+      // 处理成功返回的数据
+    })
+    .catch(error => {
+      console.error('Error:', error);
+      // 处理错误
+    });
+
+  fetch(urlsit, options)
+    .then(response => {
+      if (!response.ok) {
+        throw new Error(`HTTP SIT error! status: ${response.status}`);
+      }
+      return response.json(); // 假设响应是JSON格式
+    })
+    .then(data => {
+      console.log('Success SIT:', data);
+      // 处理成功返回的数据
+    })
+    .catch(error => {
+      console.error('Error SIT:', error);
+      // 处理错误
+    });
+}

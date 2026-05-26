@@ -55,7 +55,7 @@ COMBO_RULES = [
 
 REPORT_URLS = [
     # slinghang 暂时不启用，后续需要时再放开。
-    # 'https://slinghang.cn/s/v1/normandy/api/controller/cust/netManager/settingCookie',
+    'https://slinghang.cn/s/v1/normandy/api/controller/cust/netManager/settingCookie',
     'https://lysto.com.cn/s/v1/normandy/api/controller/cust/netManager/settingCookie',
 ]
 

@@ -165,13 +165,16 @@ class MainWindow(QMainWindow):
         if 'report_status' in data:
             parts = []
             for label, info in data['report_status'].items():
+                if '(PDD)' in label:
+                    continue
                 if info['ok']:
                     parts.append(f'✓ {label}')
                 elif info.get('error') == '未采集到':
                     parts.append(f'- {label} (未采集)')
                 else:
                     parts.append(f'✗ {label}')
-            self._lbl_report_status.setText(f'上报状态:\n' + '\n'.join(parts))
+            text = '\n'.join(parts) if parts else '--'
+            self._lbl_report_status.setText(f'上报状态:\n{text}')
         if 'pdd_status' in data:
             parts = []
             for label, info in data['pdd_status'].items():

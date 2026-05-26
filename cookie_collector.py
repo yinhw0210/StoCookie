@@ -20,7 +20,7 @@ def _domain_match(cookie_domain: str, rule_domain: str) -> bool:
         return cookie_domain == rule_domain or cookie_domain.endswith(rule_domain)
     return rule_domain in cookie_domain
 
-# 插件上报的完整类型列表（用于 GUI 展示逐条状态）
+# STO 上报的完整类型列表（用于 GUI 展示逐条状态）
 EXPECTED_REPORT_ITEMS = [
     {'label': 'SESSION (finance-mng)', 'rule_domain': 'finance-mng.sto.cn', 'rule_name': 'SESSION'},
     {'label': 'cod (market-cod)', 'rule_domain': 'market-cod.sto.cn', 'rule_name': 'cod'},
@@ -32,7 +32,6 @@ EXPECTED_REPORT_ITEMS = [
     {'label': 'WD_SESSION+TSID 组合', 'combo': True, 'names': ['WD_SESSION', 'TSID']},
     {'label': 'CFO_DOWNLOAD 组合', 'combo': True, 'names': ['sid_cfo', 'WD_SESSION', 'TSID']},
     {'label': 'KFSD (wangdian全量)', 'kfsd': True},
-    {'label': 'SUB_PASS_ID (PDD)', 'pdd': True},
 ]
 
 

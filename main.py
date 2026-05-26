@@ -22,10 +22,11 @@ def main():
     os.makedirs(LOG_DIR, exist_ok=True)
 
     logger.remove()
-    logger.add(sys.stderr, level='INFO')
+    logger.add(sys.stderr, level='INFO', diagnose=False, backtrace=False)
     logger.add(
         os.path.join(LOG_DIR, 'stocookie-{time:YYYY-MM-DD}.log'),
         rotation='00:00', retention='30 days', level='DEBUG',
+        diagnose=False, backtrace=False,
     )
 
     app = QApplication(sys.argv)

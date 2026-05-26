@@ -1,7 +1,1 @@
-{
-  "collect_interval": 60,
-  "heartbeat_interval": 60,
-  "pdd_enabled": true,
-  "pdd_account": "17753992087",
-  "pdd_password": "TTrr1234"
-}
+{"collect_interval": 60, "heartbeat_interval": 30, "pdd_enabled": true, "pdd_account": "17753992087", "pdd_password": "TTrr1234"}
