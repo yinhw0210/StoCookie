@@ -8,8 +8,12 @@ from loguru import logger
 from config import REPORT_URLS
 
 
-def _build_report_url(base_url: str, cookie_str: str) -> str:
-    return f'{base_url}?cookie={quote(cookie_str)}'
+def _build_report_url(base_url: str, cookie_str: str, extra_params: dict | None = None) -> str:
+    url = f'{base_url}?cookie={quote(cookie_str)}'
+    if extra_params:
+        for k, v in extra_params.items():
+            url += f'&{quote(str(k))}={quote(str(v))}'
+    return url
 
 
 def _short_name(base_url: str) -> str:
@@ -45,7 +49,7 @@ def _emit(emit_log, message: str, level: str = 'info', category: str = 'report')
         logger.info(message)
 
 
-async def report_cookies(payloads: list[str], emit_log=None, log_category: str = 'report') -> list[dict]:
+async def report_cookies(payloads: list[str], emit_log=None, log_category: str = 'report', extra_params: dict | None = None) -> list[dict]:
     """
     上报 Cookie，返回逐条详细结果。
     每条: {'cookie': 'SESSION=xxx...', 'results': [{'url': 'lysto', 'ok': True, 'error': None}, ...]}
@@ -72,13 +76,13 @@ async def report_cookies(payloads: list[str], emit_log=None, log_category: str =
     async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
         for idx, cookie_str in enumerate(payloads, 1):
             entry = {'cookie': cookie_str[:60], 'results': []}
+            extra_params_text = f' extra_params={extra_params}' if extra_params else ''
             _emit(
                 emit_log,
-                f'[上报入参] {idx}/{total} cookie_len={len(cookie_str)} cookie={cookie_str}',
+                f'[上报入参] {idx}/{total} cookie_len={len(cookie_str)} cookie={cookie_str}{extra_params_text}',
                 category=log_category,
             )
             for base_url in REPORT_URLS:
-                url = _build_report_url(base_url, cookie_str)
                 short_name = _short_name(base_url)
                 params_text = _request_params(cookie_str)
                 started_at = time.perf_counter()
@@ -88,6 +92,7 @@ async def report_cookies(payloads: list[str], emit_log=None, log_category: str =
                         f'[上报请求] {idx}/{total} {short_name} endpoint={base_url} params={params_text}',
                         category=log_category,
                     )
+                    url = _build_report_url(base_url, cookie_str, extra_params)
                     resp = await client.get(url)
                     elapsed_ms = int((time.perf_counter() - started_at) * 1000)
                     body = _clip(resp.text)

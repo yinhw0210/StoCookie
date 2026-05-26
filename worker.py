@@ -44,6 +44,7 @@ COOKIE_REPORT_LABELS = {
     'WD_SESSION=': 'WD_SESSION (wutonggateway)',
     'KFSD=': 'KFSD (wangdian全量)',
     'CFO_DOWNLOAD': 'CFO_DOWNLOAD 组合',
+    'WD_STO=': 'WD_STO 组合',
 }
 
 
@@ -340,7 +341,9 @@ class BackgroundWorker(threading.Thread):
                 return
 
             self._emit_log(f'mapAreaDetail 生成 KFSD payload: {payload[:80]}...', 'report')
-            reports = await report_cookies([payload], emit_log=self._emit_log)
+            account_name = await self._get_account_name()
+            extra_params = {'isScript': '1', 'accountName': account_name}
+            reports = await report_cookies([payload], emit_log=self._emit_log, extra_params=extra_params)
             total_success = sum(1 for entry in reports for r in entry['results'] if r['ok'])
             total_fail = sum(1 for entry in reports for r in entry['results'] if not r['ok'])
             for entry in reports:
@@ -579,6 +582,34 @@ class BackgroundWorker(threading.Thread):
         except Exception as e:
             self._emit_log(f'finance-fundmanage 通过搜索入口重新打开失败: {e}', 'heartbeat')
 
+    async def _get_account_name(self) -> str:
+        """从 wangdian.sto.cn/index 页面的 localStorage 中获取 userName"""
+        try:
+            wangdian_page = self._persistent_pages.get(WANGDIAN_INDEX_URL)
+            if not wangdian_page or wangdian_page.is_closed():
+                self._emit_log('wangdian 页面不可用，accountName 取空', 'general')
+                return ''
+
+            user_name = await wangdian_page.evaluate('''() => {
+                try {
+                    const data = localStorage.getItem('originalUserData');
+                    if (!data) return '';
+                    const obj = JSON.parse(data);
+                    return obj.userName || '';
+                } catch (e) {
+                    return '';
+                }
+            }''')
+
+            if user_name:
+                self._emit_log(f'获取到 accountName: {user_name}', 'general')
+            else:
+                self._emit_log('localStorage 中未找到 userName，accountName 取空', 'general')
+            return user_name or ''
+        except Exception as e:
+            self._emit_log(f'获取 accountName 失败: {e}，取空', 'general')
+            return ''
+
     async def _do_collect_and_report(self, context):
         """仅执行 Cookie 采集和上报，不做 session 检测和 reload"""
         self._emit_log('=== 开始采集上报 ===', 'report')
@@ -596,7 +627,9 @@ class BackgroundWorker(threading.Thread):
                 return
 
             self._emit_log(f'开始上报 {len(payloads)} 条 Cookie...', 'report')
-            reports = await report_cookies(payloads, emit_log=self._emit_log)
+            account_name = await self._get_account_name()
+            extra_params = {'isScript': '1', 'accountName': account_name}
+            reports = await report_cookies(payloads, emit_log=self._emit_log, extra_params=extra_params)
 
             now_str = datetime.now().strftime('%H:%M:%S')
             report_status = {}
@@ -759,7 +792,9 @@ class BackgroundWorker(threading.Thread):
             self._emit_status({'pdd_status': {'SUB_PASS_ID (PDD)': {'ok': False, 'error': '未采集到', 'time': now_str}}})
             return
 
-        reports = await report_cookies(payloads, emit_log=self._emit_log, log_category='pdd')
+        account_name = await self._get_account_name()
+        extra_params = {'isScript': '1', 'accountName': account_name}
+        reports = await report_cookies(payloads, emit_log=self._emit_log, log_category='pdd', extra_params=extra_params)
         for entry in reports:
             all_ok = all(r['ok'] for r in entry['results'])
             if all_ok:

@@ -51,6 +51,11 @@ COMBO_RULES = [
         'names': ['sid_cfo', 'WD_SESSION', 'TSID'],
         'format': lambda cookies: 'CFO_DOWNLOAD' + ';'.join(f'{c["name"]}={c["value"]}' for c in cookies),
     },
+    {
+        'domain': '.sto.cn',
+        'names': ['stoToken', 'WD_SESSION'],
+        'format': lambda cookies: 'WD_STO=' + ';'.join(f'{c["name"]}={c["value"]}' for c in cookies) + ';',
+    },
 ]
 
 REPORT_URLS = [
