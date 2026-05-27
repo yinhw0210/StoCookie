@@ -73,7 +73,7 @@ async def report_cookies(payloads: list[str], emit_log=None, log_category: str =
     )
 
     # 仅让 Cookie 上报绕过系统/环境代理，避免代理链路影响写库请求
-    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
+    async with httpx.AsyncClient(timeout=60, trust_env=False) as client:
         for idx, cookie_str in enumerate(payloads, 1):
             entry = {'cookie': cookie_str[:60], 'results': []}
             extra_params_text = f' extra_params={extra_params}' if extra_params else ''
