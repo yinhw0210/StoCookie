@@ -68,7 +68,7 @@ async def report_cookies(payloads: list[str], emit_log=None, log_category: str =
     )
     _emit(
         emit_log,
-        '[上报配置] method=GET timeout=10s proxy=disabled(trust_env=False)',
+        '[上报配置] method=GET timeout=60s proxy=disabled(trust_env=False)',
         category=log_category,
     )
 

