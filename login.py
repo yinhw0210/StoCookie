@@ -15,6 +15,14 @@ from config import (
 from desktop_automation import click_dingtalk_confirm
 
 
+async def _has_dingtalk_frame(page: Page) -> bool:
+    """快速检测页面是否包含钉钉登录 iframe（不抛异常）"""
+    return any(
+        'login.dingtalk.com/oauth2/challenge' in f.url
+        for f in page.frames
+    )
+
+
 async def _get_dingtalk_frame(page: Page, retries: int = 3) -> Frame:
     """定位钉钉 OAuth2 iframe"""
     for i in range(retries):
@@ -136,6 +144,21 @@ async def _finish_confirm_task(task: asyncio.Task) -> None:
         logger.debug(f'桌面确认任务取消时结束: {e}')
 
 
+async def _do_dingtalk_login_flow(page: Page) -> None:
+    """执行钉钉 iframe 登录子流程（定位 iframe、点击头像、确认登录等）"""
+    dd_frame = await _get_dingtalk_frame(page)
+    logger.info(f'[dingtalk_flow] 已定位钉钉 iframe: {dd_frame.url}')
+    await _dismiss_cookie_dialog(dd_frame)
+
+    confirm_task = asyncio.create_task(click_dingtalk_confirm(timeout=30))
+    try:
+        await _click_avatar(dd_frame)
+        await _click_confirm_login(dd_frame)
+        await _click_consent(dd_frame)
+    finally:
+        await _finish_confirm_task(confirm_task)
+
+
 async def select_first_role_if_present(page: Page) -> bool:
     """如果出现多角色选择页，选择第一个角色并点击进入系统。"""
     role_page = page.locator(ROLE_PAGE_SELECTOR)
@@ -197,13 +220,26 @@ async def click_safety_quick_login_if_present(page: Page) -> bool:
 async def wait_for_wangdian_entry_or_role(page: Page, timeout_ms: int = 60000) -> None:
     """等待进入网点系统；必要时处理虎盾快速登录和角色选择页。"""
     deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
+    dingtalk_attempted = False
+
     while asyncio.get_running_loop().time() < deadline:
         if is_logged_in_url(page.url):
             logger.info(f'已进入网点系统: {page.url}')
             return
 
         if await click_safety_quick_login_if_present(page):
-            await page.wait_for_timeout(1000)
+            await page.wait_for_timeout(2000)
+            continue
+
+        # 检测钉钉 iframe 并执行登录
+        if not dingtalk_attempted and await _has_dingtalk_frame(page):
+            logger.info('[wait] 检测到钉钉 iframe，执行钉钉登录流程')
+            dingtalk_attempted = True
+            try:
+                await _do_dingtalk_login_flow(page)
+                await page.wait_for_timeout(3000)
+            except Exception as e:
+                logger.warning(f'[wait] 钉钉登录流程异常: {e}')
             continue
 
         if await select_first_role_if_present(page):
@@ -247,6 +283,7 @@ async def login_via_dingtalk(page: Page, skip_navigate: bool = False) -> bool:
             return True
 
     if await click_safety_quick_login_if_present(page):
+        await page.wait_for_timeout(2000)
         await wait_for_wangdian_entry_or_role(page)
         logger.info('钉钉登录成功')
         return True

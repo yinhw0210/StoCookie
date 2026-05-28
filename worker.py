@@ -277,14 +277,23 @@ class BackgroundWorker(threading.Thread):
         from login import (
             _get_dingtalk_frame, _dismiss_cookie_dialog, _click_avatar,
             _click_confirm_login, _click_consent, click_safety_quick_login_if_present,
+            _has_dingtalk_frame,
         )
         from desktop_automation import click_dingtalk_confirm
 
         await page.wait_for_timeout(2000)
 
         if await click_safety_quick_login_if_present(page):
-            await page.wait_for_timeout(5000)
-            return
+            await page.wait_for_timeout(3000)
+            if not is_auth_url(page.url):
+                return  # 已离开认证页，成功
+            # 仍在认证页，检查是否有钉钉 iframe
+            if not await _has_dingtalk_frame(page):
+                await page.wait_for_timeout(3000)
+                if not is_auth_url(page.url):
+                    return
+                self._emit_log('虎盾快速登录后仍在认证页，尝试钉钉流程', 'login')
+            # 继续执行下面的钉钉登录流程
 
         dd_frame = await _get_dingtalk_frame(page)
         self._emit_log(f'已定位钉钉 iframe: {dd_frame.url}', 'login')
