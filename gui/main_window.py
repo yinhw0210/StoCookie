@@ -136,7 +136,7 @@ class MainWindow(QMainWindow):
             self._append_log(category_map[category], msg)
 
         # 错误 Tab：包含失败/异常/过期关键词
-        error_keywords = ('失败', '异常', '过期', '超时', '错误', 'ERROR', 'WARNING', '✗')
+        error_keywords = ('失败', '异常', '过期', '超时', '错误', 'ERROR', 'WARNING', '✗', '⚠')
         if any(kw in msg for kw in error_keywords):
             self._append_log('错误', msg)
 
@@ -145,6 +145,40 @@ class MainWindow(QMainWindow):
         if view:
             view.append(msg)
             view.moveCursor(QTextCursor.MoveOperation.End)
+
+    def _format_target_status(self, statuses: dict, skip_pdd: bool = False) -> list[str]:
+        parts = []
+        for label, info in statuses.items():
+            if skip_pdd and '(PDD)' in label:
+                continue
+
+            error = info.get('error', '')
+            if error == '未采集到':
+                parts.append(f'- {label} (未采集)')
+                continue
+
+            targets = info.get('targets') or []
+            if info.get('ok'):
+                marker = '✓'
+            elif info.get('partial'):
+                marker = '⚠'
+            else:
+                marker = '✗'
+
+            if targets or not error or info.get('partial'):
+                parts.append(f'{marker} {label}')
+            else:
+                parts.append(f'{marker} {label} ({error})')
+
+            for target in targets:
+                name = target.get('name', '--')
+                if target.get('ok'):
+                    parts.append(f'  {name} ✓')
+                else:
+                    target_error = target.get('error') or ''
+                    suffix = f' {target_error}' if target_error else ''
+                    parts.append(f'  {name} ✗{suffix}')
+        return parts
 
     @Slot(dict)
     def _on_status(self, data: dict):
@@ -163,26 +197,11 @@ class MainWindow(QMainWindow):
             m, s = divmod(rem, 60)
             self._lbl_next_heartbeat.setText(f'下次心跳：{h:02d}:{m:02d}:{s:02d}')
         if 'report_status' in data:
-            parts = []
-            for label, info in data['report_status'].items():
-                if '(PDD)' in label:
-                    continue
-                if info['ok']:
-                    parts.append(f'✓ {label}')
-                elif info.get('error') == '未采集到':
-                    parts.append(f'- {label} (未采集)')
-                else:
-                    parts.append(f'✗ {label}')
+            parts = self._format_target_status(data['report_status'], skip_pdd=True)
             text = '\n'.join(parts) if parts else '--'
             self._lbl_report_status.setText(f'上报状态:\n{text}')
         if 'pdd_status' in data:
-            parts = []
-            for label, info in data['pdd_status'].items():
-                if info['ok']:
-                    parts.append(f'✓ {label}')
-                else:
-                    error = info.get('error', '')
-                    parts.append(f'✗ {label} ({error})' if error else f'✗ {label}')
+            parts = self._format_target_status(data['pdd_status'])
             self._lbl_pdd_status.setText(f'PDD:\n' + '\n'.join(parts))
         if 'paused' in data and data['paused']:
             self._lbl_next_collect.setText('下次同步：⏸ 已暂停')

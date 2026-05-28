@@ -1,4 +1,6 @@
+import asyncio
 import json
+import socket
 import time
 from urllib.parse import quote
 
@@ -49,6 +51,76 @@ def _emit(emit_log, message: str, level: str = 'info', category: str = 'report')
         logger.info(message)
 
 
+async def _resolve_host_ips(host: str, port: int) -> list[str]:
+    loop = asyncio.get_running_loop()
+    infos = await loop.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_STREAM)
+    ips = []
+    seen = set()
+    for info in infos:
+        ip = info[4][0]
+        if ip not in seen:
+            seen.add(ip)
+            ips.append(ip)
+    return ips
+
+
+async def _get_with_dns_failover(client: httpx.AsyncClient, url: str, emit_log=None, log_category: str = 'report') -> httpx.Response:
+    try:
+        return await client.get(url)
+    except httpx.ConnectError as first_exc:
+        parsed = httpx.URL(url)
+        host = parsed.host
+        if not host:
+            raise
+
+        port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+        default_port = 443 if parsed.scheme == 'https' else 80
+        host_header = host if port == default_port else f'{host}:{port}'
+
+        try:
+            ips = await _resolve_host_ips(host, port)
+        except OSError as dns_exc:
+            _emit(
+                emit_log,
+                f'[上报DNS] host={host} resolve_failed={type(dns_exc).__name__}: {dns_exc}',
+                level='warning',
+                category=log_category,
+            )
+            raise first_exc
+
+        if not ips:
+            raise first_exc
+
+        _emit(emit_log, f'[上报DNS] host={host} candidates={",".join(ips)}', category=log_category)
+        last_exc = first_exc
+        for ip in ips:
+            started_at = time.perf_counter()
+            fallback_url = parsed.copy_with(host=ip)
+            request = client.build_request('GET', fallback_url, headers={'Host': host_header})
+            if parsed.scheme == 'https':
+                request.extensions['sni_hostname'] = host
+            try:
+                response = await client.send(request)
+                elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+                _emit(
+                    emit_log,
+                    f'[上报DNS尝试] host={host} ip={ip} OK status={response.status_code} elapsed={elapsed_ms}ms',
+                    category=log_category,
+                )
+                return response
+            except httpx.ConnectError as exc:
+                elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+                last_exc = exc
+                _emit(
+                    emit_log,
+                    f'[上报DNS尝试] host={host} ip={ip} ConnectError elapsed={elapsed_ms}ms error={_error_text(exc)}',
+                    level='warning',
+                    category=log_category,
+                )
+
+        raise last_exc
+
+
 async def report_cookies(payloads: list[str], emit_log=None, log_category: str = 'report', extra_params: dict | None = None) -> list[dict]:
     """
     上报 Cookie，返回逐条详细结果。
@@ -94,7 +166,7 @@ async def report_cookies(payloads: list[str], emit_log=None, log_category: str =
                         category=log_category,
                     )
                     url = _build_report_url(base_url, cookie_str, extra_params)
-                    resp = await client.get(url)
+                    resp = await _get_with_dns_failover(client, url, emit_log, log_category)
                     elapsed_ms = int((time.perf_counter() - started_at) * 1000)
                     body = _clip(resp.text)
                     content_type = resp.headers.get('content-type', '')

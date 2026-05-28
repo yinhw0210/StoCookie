@@ -619,6 +619,24 @@ class BackgroundWorker(threading.Thread):
             self._emit_log(f'获取 accountName 失败: {e}，取空', 'general')
             return ''
 
+    def _build_report_status_info(self, results: list[dict], now_str: str) -> dict:
+        targets = [
+            {'name': r['url'], 'ok': r['ok'], 'error': r.get('error')}
+            for r in results
+        ]
+        all_ok = bool(targets) and all(t['ok'] for t in targets)
+        any_ok = any(t['ok'] for t in targets)
+        errors = [f'{t["name"]}:{t["error"]}' for t in targets if not t['ok']]
+        info = {
+            'ok': all_ok,
+            'partial': any_ok and not all_ok,
+            'time': now_str,
+            'targets': targets,
+        }
+        if errors:
+            info['error'] = ', '.join(errors)
+        return info
+
     async def _do_collect_and_report(self, context):
         """仅执行 Cookie 采集和上报，不做 session 检测和 reload"""
         self._emit_log('=== 开始采集上报 ===', 'report')
@@ -646,29 +664,32 @@ class BackgroundWorker(threading.Thread):
             for entry in reports:
                 cookie_str = entry['cookie']
                 label = self._resolve_cookie_label(cookie_str)
-                all_ok = all(r['ok'] for r in entry['results'])
-                if all_ok:
-                    report_status[label] = {'ok': True, 'time': now_str}
+                info = self._build_report_status_info(entry['results'], now_str)
+                report_status[label] = info
+                if info['ok']:
                     self._emit_log(f'✓ {label} 上报成功', 'report')
+                elif info.get('partial'):
+                    self._emit_log(f'⚠ {label} 部分上报成功 → {info.get("error", "")}', 'report')
                 else:
-                    errors = [f'{r["url"]}:{r["error"]}' for r in entry['results'] if not r['ok']]
-                    report_status[label] = {'ok': False, 'error': ', '.join(errors), 'time': now_str}
-                    self._emit_log(f'✗ {label} 上报失败 → {", ".join(errors)}', 'report')
+                    self._emit_log(f'✗ {label} 上报失败 → {info.get("error", "")}', 'report')
 
             # 补充未采集到的项目（在 EXPECTED_REPORT_ITEMS 中但不在 payloads 中的）
             for item in EXPECTED_REPORT_ITEMS:
                 if item['label'] not in report_status:
                     report_status[item['label']] = {'ok': False, 'error': '未采集到', 'time': now_str}
 
-            total_success = sum(1 for v in report_status.values() if v['ok'])
-            total_fail = sum(1 for v in report_status.values() if not v['ok'])
             total_missing = sum(1 for v in report_status.values() if v.get('error') == '未采集到')
+            total_success = sum(1 for v in report_status.values() if v['ok'])
+            total_partial = sum(1 for v in report_status.values() if v.get('partial'))
+            total_fail = sum(1 for v in report_status.values() if not v['ok'] and not v.get('partial') and v.get('error') != '未采集到')
 
             self._emit_status({'report_status': report_status})
 
             summary_parts = [f'成功{total_success}']
-            if total_fail - total_missing > 0:
-                summary_parts.append(f'失败{total_fail - total_missing}')
+            if total_partial > 0:
+                summary_parts.append(f'部分成功{total_partial}')
+            if total_fail > 0:
+                summary_parts.append(f'失败{total_fail}')
             if total_missing > 0:
                 summary_parts.append(f'未采集{total_missing}')
 
@@ -805,14 +826,16 @@ class BackgroundWorker(threading.Thread):
         extra_params = {'isScript': '1', 'accountName': account_name}
         reports = await report_cookies(payloads, emit_log=self._emit_log, log_category='pdd', extra_params=extra_params)
         for entry in reports:
-            all_ok = all(r['ok'] for r in entry['results'])
-            if all_ok:
+            info = self._build_report_status_info(entry['results'], now_str)
+            if info['ok']:
                 self._emit_log('PDD: ✓ SUB_PASS_ID 上报成功', 'pdd')
-                self._emit_status({'pdd_status': {'SUB_PASS_ID (PDD)': {'ok': True, 'time': now_str}}})
+                self._emit_status({'pdd_status': {'SUB_PASS_ID (PDD)': info}})
+            elif info.get('partial'):
+                self._emit_log(f'PDD: ⚠ SUB_PASS_ID 部分上报成功 → {info.get("error", "")}', 'pdd')
+                self._emit_status({'pdd_status': {'SUB_PASS_ID (PDD)': info}})
             else:
-                errors = [f'{r["url"]}:{r["error"]}' for r in entry['results'] if not r['ok']]
-                self._emit_log(f'PDD: ✗ SUB_PASS_ID 上报失败 → {", ".join(errors)}', 'pdd')
-                self._emit_status({'pdd_status': {'SUB_PASS_ID (PDD)': {'ok': False, 'error': ', '.join(errors), 'time': now_str}}})
+                self._emit_log(f'PDD: ✗ SUB_PASS_ID 上报失败 → {info.get("error", "")}', 'pdd')
+                self._emit_status({'pdd_status': {'SUB_PASS_ID (PDD)': info}})
         self._emit_log('PDD: === 同步周期结束 ===', 'pdd')
 
     def trigger_sync(self):
