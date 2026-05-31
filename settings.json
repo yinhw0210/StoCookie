@@ -1,1 +1,15 @@
-{"collect_interval": 60, "heartbeat_interval": 30, "pdd_enabled": true, "pdd_account": "17753992087", "pdd_password": "TTrr1234"}
+{
+    "collect_interval": 60,
+    "heartbeat_interval": 30,
+    "pdd_enabled": true,
+    "pdd_account": "17753992087",
+    "pdd_password": "TTrr1234",
+    "proactive_refresh": [
+        {
+            "url": "https://page.sto.cn/ux/manipulate-center/index.html#/",
+            "cookie_name": "sid_cfo",
+            "ttl_hours": 12,
+            "advance_minutes": 10
+        }
+    ]
+}

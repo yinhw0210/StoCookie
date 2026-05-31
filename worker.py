@@ -81,6 +81,8 @@ class BackgroundWorker(threading.Thread):
         settings = _load_settings()
         self._collect_interval = settings.get('collect_interval', COLLECT_INTERVAL_MINUTES)
         self._heartbeat_interval = settings.get('heartbeat_interval', HEARTBEAT_INTERVAL_MINUTES)
+        self._proactive_refresh_rules = settings.get('proactive_refresh', [])
+        self._cookie_obtained_at: dict[str, float] = {}
 
     @property
     def collect_interval(self):
@@ -158,8 +160,14 @@ class BackgroundWorker(threading.Thread):
 
                 now = time.time()
                 sync_due = (now - last_sync) >= self._collect_interval * 60
+                proactive_due = self._check_proactive_refresh_due(now)
 
-                if sync_due:
+                if proactive_due:
+                    await self._do_proactive_refresh(context)
+                    if self._pdd:
+                        await self._do_pdd_sync_cycle()
+                    last_sync = time.time()
+                elif sync_due:
                     await self._do_sync_cycle(context)
                     if self._pdd:
                         await self._do_pdd_sync_cycle()
@@ -644,6 +652,9 @@ class BackgroundWorker(threading.Thread):
             payloads = await collect_cookies(context)
             self._emit_log(f'Cookie 采集完成: {len(payloads)} 条待上报', 'report')
 
+            # 记录配置中关注的 cookie 获取时间（用于预判刷新）
+            self._record_cookie_obtained_time(payloads)
+
             if not payloads:
                 # 构建完整的未命中状态
                 report_status = {}
@@ -698,6 +709,55 @@ class BackgroundWorker(threading.Thread):
         except Exception as e:
             self._emit_status({'sync': f'上报失败: {e}'})
             self._emit_log(f'采集上报异常: {e}', 'report')
+
+    def _record_cookie_obtained_time(self, payloads: list[str]):
+        for rule in self._proactive_refresh_rules:
+            cookie_name = rule['cookie_name']
+            for payload in payloads:
+                if payload.startswith(f'{cookie_name}=') or f';{cookie_name}=' in payload:
+                    if cookie_name not in self._cookie_obtained_at:
+                        self._cookie_obtained_at[cookie_name] = time.time()
+                        self._emit_log(f'[预判] 记录 {cookie_name} 获取时间', 'report')
+                    break
+
+    def _check_proactive_refresh_due(self, now: float) -> bool:
+        for rule in self._proactive_refresh_rules:
+            cookie_name = rule['cookie_name']
+            ttl_seconds = rule.get('ttl_hours', 12) * 3600
+            advance_seconds = rule.get('advance_minutes', 10) * 60
+
+            obtained_at = self._cookie_obtained_at.get(cookie_name)
+            if obtained_at is None:
+                continue
+
+            refresh_at = obtained_at + ttl_seconds - advance_seconds
+            if now >= refresh_at:
+                self._emit_log(
+                    f'[预判] {cookie_name} 即将过期，触发预判刷新 '
+                    f'(获取于 {int((now - obtained_at) / 3600)}h{int((now - obtained_at) % 3600 / 60)}m 前)',
+                    'report',
+                )
+                return True
+        return False
+
+    async def _do_proactive_refresh(self, context):
+        """预判刷新：删除即将过期的 cookie，然后走正常同步流程"""
+        for rule in self._proactive_refresh_rules:
+            cookie_name = rule['cookie_name']
+            obtained_at = self._cookie_obtained_at.get(cookie_name)
+            if obtained_at is None:
+                continue
+
+            ttl_seconds = rule.get('ttl_hours', 12) * 3600
+            advance_seconds = rule.get('advance_minutes', 10) * 60
+            now = time.time()
+
+            if now >= obtained_at + ttl_seconds - advance_seconds:
+                self._emit_log(f'[预判] 删除 cookie: {cookie_name}', 'report')
+                await context.clear_cookies(name=cookie_name)
+                self._cookie_obtained_at.pop(cookie_name, None)
+
+        await self._do_sync_cycle(context)
 
     async def _do_sync_cycle(self, context):
         self._emit_status({'sync': '同步中...', 'heartbeat': '检测中...'})

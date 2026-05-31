@@ -94,6 +94,7 @@ def is_logged_in_url(url: str) -> bool:
 
 COLLECT_INTERVAL_MINUTES = 60
 HEARTBEAT_INTERVAL_MINUTES = 60
+PROACTIVE_REFRESH_RULES = []
 
 # PDD 站点配置
 PDD_LOGIN_URL = 'https://56-partner.pinduoduo.com/auth/login'
