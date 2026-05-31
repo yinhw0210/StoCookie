@@ -7,9 +7,9 @@
     "proactive_refresh": [
         {
             "url": "https://page.sto.cn/ux/manipulate-center/index.html#/",
-            "cookie_name": "sid_cfo",
+            "cookie_name": "spf_sid",
             "ttl_hours": 12,
-            "advance_minutes": 10
+            "advance_minutes": 0
         }
     ]
 }

@@ -724,24 +724,32 @@ class BackgroundWorker(threading.Thread):
         for rule in self._proactive_refresh_rules:
             cookie_name = rule['cookie_name']
             ttl_seconds = rule.get('ttl_hours', 12) * 3600
-            advance_seconds = rule.get('advance_minutes', 10) * 60
+            offset_seconds = rule.get('advance_minutes', 0) * 60
 
             obtained_at = self._cookie_obtained_at.get(cookie_name)
             if obtained_at is None:
                 continue
 
-            refresh_at = obtained_at + ttl_seconds - advance_seconds
+            refresh_at = obtained_at + ttl_seconds + offset_seconds
             if now >= refresh_at:
-                self._emit_log(
-                    f'[预判] {cookie_name} 即将过期，触发预判刷新 '
-                    f'(获取于 {int((now - obtained_at) / 3600)}h{int((now - obtained_at) % 3600 / 60)}m 前)',
-                    'report',
-                )
+                elapsed = now - obtained_at
+                if offset_seconds >= 0:
+                    self._emit_log(
+                        f'[预判] {cookie_name} 已过期，触发刷新 '
+                        f'(获取于 {int(elapsed / 3600)}h{int(elapsed % 3600 / 60)}m 前)',
+                        'report',
+                    )
+                else:
+                    self._emit_log(
+                        f'[预判] {cookie_name} 即将过期（提前 {-rule.get("advance_minutes", 0)}m），触发刷新 '
+                        f'(获取于 {int(elapsed / 3600)}h{int(elapsed % 3600 / 60)}m 前)',
+                        'report',
+                    )
                 return True
         return False
 
     async def _do_proactive_refresh(self, context):
-        """预判刷新：删除即将过期的 cookie，然后走正常同步流程"""
+        """预判刷新：删除过期/即将过期的 cookie，然后走正常同步流程"""
         for rule in self._proactive_refresh_rules:
             cookie_name = rule['cookie_name']
             obtained_at = self._cookie_obtained_at.get(cookie_name)
@@ -749,10 +757,10 @@ class BackgroundWorker(threading.Thread):
                 continue
 
             ttl_seconds = rule.get('ttl_hours', 12) * 3600
-            advance_seconds = rule.get('advance_minutes', 10) * 60
+            offset_seconds = rule.get('advance_minutes', 0) * 60
             now = time.time()
 
-            if now >= obtained_at + ttl_seconds - advance_seconds:
+            if now >= obtained_at + ttl_seconds + offset_seconds:
                 self._emit_log(f'[预判] 删除 cookie: {cookie_name}', 'report')
                 await context.clear_cookies(name=cookie_name)
                 self._cookie_obtained_at.pop(cookie_name, None)

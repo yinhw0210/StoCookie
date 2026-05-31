@@ -33,9 +33,9 @@ class _ProactiveRuleRow(QFrame):
         self._spin_ttl.setSuffix('h 过期')
 
         self._spin_advance = QSpinBox()
-        self._spin_advance.setRange(1, 120)
-        self._spin_advance.setValue(rule.get('advance_minutes', 10) if rule else 10)
-        self._spin_advance.setSuffix('m 提前')
+        self._spin_advance.setRange(-120, 120)
+        self._spin_advance.setValue(rule.get('advance_minutes', 0) if rule else 0)
+        self._spin_advance.setSuffix('m 偏移')
 
         self._btn_remove = QPushButton('✕')
         self._btn_remove.setFixedSize(22, 22)
@@ -125,7 +125,7 @@ class SettingsDialog(QDialog):
         proactive_header.addWidget(btn_add_rule)
         layout.addLayout(proactive_header)
 
-        proactive_hint = QLabel('到期前自动删除 cookie 并重新登录获取新 cookie')
+        proactive_hint = QLabel('偏移: 正数=过期后延迟刷新, 负数=过期前提前刷新, 0=到期立即刷新')
         proactive_hint.setStyleSheet('color: #64748b; font-size: 11px;')
         layout.addWidget(proactive_hint)
 
