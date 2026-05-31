@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>StoCookie - Cookie 自动采集上报工具</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; color: #e0e0e0; min-height: 100vh; padding: 16px; }
+
+.app-container { max-width: 600px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
+
+/* Header */
+.app-header { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; background: #16213e; border-radius: 10px; }
+.app-title { font-size: 18px; font-weight: 600; color: #fff; }
+.header-actions { display: flex; gap: 8px; }
+.header-actions button { padding: 6px 12px; border: none; border-radius: 6px; font-size: 12px; cursor: pointer; font-weight: 500; }
+.btn-primary { background: #4361ee; color: #fff; }
+.btn-secondary { background: #2d3748; color: #e0e0e0; }
+.btn-warning { background: #f59e0b; color: #1a1a2e; }
+.btn-danger { background: #ef4444; color: #fff; }
+
+/* Status Cards Row */
+.status-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.status-card { background: #16213e; border-radius: 8px; padding: 12px; text-align: center; }
+.status-card .label { font-size: 11px; color: #8892b0; margin-bottom: 4px; }
+.status-card .value { font-size: 14px; font-weight: 600; }
+.status-card .value.ok { color: #10b981; }
+.status-card .value.warning { color: #f59e0b; }
+.status-card .value.error { color: #ef4444; }
+.status-card .value.countdown { color: #60a5fa; font-family: 'JetBrains Mono', monospace; }
+
+/* Report Status Grid */
+.report-section { background: #16213e; border-radius: 10px; padding: 12px; }
+.report-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.report-title { font-size: 13px; font-weight: 600; color: #8892b0; }
+.report-summary { font-size: 11px; color: #8892b0; }
+
+.report-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.report-item { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: #0f3460; border-radius: 6px; font-size: 12px; }
+.report-item .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.report-item .dot.ok { background: #10b981; }
+.report-item .dot.fail { background: #ef4444; }
+.report-item .dot.partial { background: #f59e0b; }
+.report-item .dot.pending { background: #4b5563; }
+.report-item .name { flex: 1; color: #cbd5e1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.report-item .time { font-size: 10px; color: #64748b; }
+
+/* PDD Section */
+.pdd-section { background: #16213e; border-radius: 10px; padding: 12px; }
+.pdd-header { font-size: 13px; font-weight: 600; color: #8892b0; margin-bottom: 8px; }
+.pdd-status { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.pdd-status .dot { width: 8px; height: 8px; border-radius: 50%; background: #10b981; }
+
+/* Log Section */
+.log-section { background: #16213e; border-radius: 10px; overflow: hidden; flex: 1; min-height: 200px; display: flex; flex-direction: column; }
+.log-tabs { display: flex; border-bottom: 1px solid #2d3748; }
+.log-tab { padding: 8px 14px; font-size: 12px; color: #8892b0; cursor: pointer; border-bottom: 2px solid transparent; }
+.log-tab.active { color: #60a5fa; border-bottom-color: #4361ee; }
+.log-content { flex: 1; padding: 10px; font-family: 'JetBrains Mono', 'Consolas', monospace; font-size: 11px; line-height: 1.6; color: #94a3b8; overflow-y: auto; }
+.log-line { padding: 1px 0; }
+.log-line .time { color: #64748b; }
+.log-line .msg { color: #cbd5e1; }
+.log-line.error .msg { color: #ef4444; }
+.log-line.success .msg { color: #10b981; }
+</style>
+</head>
+<body>
+<div class="app-container">
+  <!-- Header with actions -->
+  <div class="app-header">
+    <span class="app-title">StoCookie</span>
+    <div class="header-actions">
+      <button class="btn-primary">立即同步</button>
+      <button class="btn-secondary">重新登录</button>
+      <button class="btn-warning">暂停</button>
+      <button class="btn-secondary">设置</button>
+    </div>
+  </div>
+
+  <!-- Status Cards -->
+  <div class="status-row">
+    <div class="status-card">
+      <div class="label">登录状态</div>
+      <div class="value ok">已登录</div>
+    </div>
+    <div class="status-card">
+      <div class="label">下次同步</div>
+      <div class="value countdown">00:45:12</div>
+    </div>
+    <div class="status-card">
+      <div class="label">心跳状态</div>
+      <div class="value ok">正常</div>
+    </div>
+  </div>
+
+  <!-- Report Status Grid -->
+  <div class="report-section">
+    <div class="report-header">
+      <span class="report-title">上报状态</span>
+      <span class="report-summary">成功 9 / 部分 1 / 失败 1 / 未采集 1 · 14:32:05</span>
+    </div>
+    <div class="report-grid">
+      <div class="report-item"><span class="dot ok"></span><span class="name">SESSION (finance-mng)</span><span class="time">14:32</span></div>
+      <div class="report-item"><span class="dot ok"></span><span class="name">cod (market-cod)</span><span class="time">14:32</span></div>
+      <div class="report-item"><span class="dot ok"></span><span class="name">finance (fundmanage)</span><span class="time">14:32</span></div>
+      <div class="report-item"><span class="dot ok"></span><span class="name">spf_sid (gateway)</span><span class="time">14:32</span></div>
+      <div class="report-item"><span class="dot ok"></span><span class="name">stoToken (gateway)</span><span class="time">14:32</span></div>
+      <div class="report-item"><span class="dot ok"></span><span class="name">sid_cfo (gateway)</span><span class="time">14:32</span></div>
+      <div class="report-item"><span class="dot ok"></span><span class="name">WD_SESSION (gateway)</span><span class="time">14:32</span></div>
+      <div class="report-item"><span class="dot ok"></span><span class="name">KFSD (wangdian)</span><span class="time">14:32</span></div>
+      <div class="report-item"><span class="dot partial"></span><span class="name">CFO_DOWNLOAD 组合</span><span class="time">14:32</span></div>
+      <div class="report-item"><span class="dot ok"></span><span class="name">WD_STO 组合</span><span class="time">14:32</span></div>
+      <div class="report-item"><span class="dot fail"></span><span class="name">WD_SESSION+TSID</span><span class="time">14:32</span></div>
+      <div class="report-item"><span class="dot pending"></span><span class="name">PDD (SUB_PASS_ID)</span><span class="time">--</span></div>
+    </div>
+  </div>
+
+  <!-- Log Section -->
+  <div class="log-section">
+    <div class="log-tabs">
+      <div class="log-tab active">全部</div>
+      <div class="log-tab">登录</div>
+      <div class="log-tab">上报</div>
+      <div class="log-tab">心跳</div>
+      <div class="log-tab">PDD</div>
+      <div class="log-tab">错误</div>
+    </div>
+    <div class="log-content">
+      <div class="log-line success"><span class="time">[14:32:05]</span> <span class="msg">✓ SESSION (finance-mng) 上报成功</span></div>
+      <div class="log-line success"><span class="time">[14:32:05]</span> <span class="msg">✓ cod (market-cod) 上报成功</span></div>
+      <div class="log-line success"><span class="time">[14:32:06]</span> <span class="msg">✓ spf_sid (wutonggateway) 上报成功</span></div>
+      <div class="log-line"><span class="time">[14:32:06]</span> <span class="msg">⚠ CFO_DOWNLOAD 组合 部分上报成功</span></div>
+      <div class="log-line error"><span class="time">[14:32:07]</span> <span class="msg">✗ WD_SESSION+TSID 上报失败 → HTTP 500</span></div>
+      <div class="log-line"><span class="time">[14:32:07]</span> <span class="msg">=== 上报完成: 成功9/部分成功1/失败1 ===</span></div>
+      <div class="log-line"><span class="time">[14:31:58]</span> <span class="msg">Cookie 采集完成: 11 条待上报</span></div>
+      <div class="log-line"><span class="time">[14:31:55]</span> <span class="msg">常驻页面 reload 完成</span></div>
+      <div class="log-line"><span class="time">[14:31:50]</span> <span class="msg">=== 同步周期开始 ===</span></div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
