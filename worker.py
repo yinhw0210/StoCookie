@@ -82,7 +82,7 @@ class BackgroundWorker(threading.Thread):
         self._collect_interval = settings.get('collect_interval', COLLECT_INTERVAL_MINUTES)
         self._heartbeat_interval = settings.get('heartbeat_interval', HEARTBEAT_INTERVAL_MINUTES)
         self._proactive_refresh_rules = settings.get('proactive_refresh', [])
-        self._cookie_obtained_at: dict[str, float] = {}
+        self._cookie_obtained_at: dict[str, tuple[str, float]] = {}
 
     @property
     def collect_interval(self):
@@ -715,10 +715,27 @@ class BackgroundWorker(threading.Thread):
             cookie_name = rule['cookie_name']
             for payload in payloads:
                 if payload.startswith(f'{cookie_name}=') or f';{cookie_name}=' in payload:
+                    cookie_value = self._extract_cookie_value(payload, cookie_name)
+
                     if cookie_name not in self._cookie_obtained_at:
-                        self._cookie_obtained_at[cookie_name] = time.time()
-                        self._emit_log(f'[预判] 记录 {cookie_name} 获取时间', 'report')
+                        self._cookie_obtained_at[cookie_name] = (cookie_value, time.time())
+                        self._emit_log(f'[预判] 首次记录 {cookie_name}', 'report')
+                    else:
+                        old_value, old_time = self._cookie_obtained_at[cookie_name]
+                        if cookie_value != old_value:
+                            self._cookie_obtained_at[cookie_name] = (cookie_value, time.time())
+                            self._emit_log(f'[预判] {cookie_name} 值变化，重置倒计时', 'report')
                     break
+
+    def _extract_cookie_value(self, payload: str, cookie_name: str) -> str:
+        """从 payload 中提取指定 cookie 的值"""
+        if payload.startswith(f'{cookie_name}='):
+            return payload.split('=', 1)[1].split(';')[0]
+        else:
+            parts = payload.split(f';{cookie_name}=')
+            if len(parts) > 1:
+                return parts[1].split(';')[0]
+        return ''
 
     def _check_proactive_refresh_due(self, now: float) -> bool:
         for rule in self._proactive_refresh_rules:
@@ -726,23 +743,25 @@ class BackgroundWorker(threading.Thread):
             ttl_seconds = rule.get('ttl_hours', 12) * 3600
             offset_seconds = rule.get('advance_minutes', 0) * 60
 
-            obtained_at = self._cookie_obtained_at.get(cookie_name)
-            if obtained_at is None:
+            record = self._cookie_obtained_at.get(cookie_name)
+            if record is None:
                 continue
 
+            cookie_value, obtained_at = record
             refresh_at = obtained_at + ttl_seconds + offset_seconds
             if now >= refresh_at:
                 elapsed = now - obtained_at
+                value_preview = cookie_value[:8] + '...' if len(cookie_value) > 8 else cookie_value
                 if offset_seconds >= 0:
                     self._emit_log(
                         f'[预判] {cookie_name} 已过期，触发刷新 '
-                        f'(获取于 {int(elapsed / 3600)}h{int(elapsed % 3600 / 60)}m 前)',
+                        f'(值: {value_preview}, 获取于 {int(elapsed / 3600)}h{int(elapsed % 3600 / 60)}m 前)',
                         'report',
                     )
                 else:
                     self._emit_log(
                         f'[预判] {cookie_name} 即将过期（提前 {-rule.get("advance_minutes", 0)}m），触发刷新 '
-                        f'(获取于 {int(elapsed / 3600)}h{int(elapsed % 3600 / 60)}m 前)',
+                        f'(值: {value_preview}, 获取于 {int(elapsed / 3600)}h{int(elapsed % 3600 / 60)}m 前)',
                         'report',
                     )
                 return True
@@ -752,16 +771,18 @@ class BackgroundWorker(threading.Thread):
         """预判刷新：删除过期/即将过期的 cookie，然后走正常同步流程"""
         for rule in self._proactive_refresh_rules:
             cookie_name = rule['cookie_name']
-            obtained_at = self._cookie_obtained_at.get(cookie_name)
-            if obtained_at is None:
+            record = self._cookie_obtained_at.get(cookie_name)
+            if record is None:
                 continue
 
+            cookie_value, obtained_at = record
             ttl_seconds = rule.get('ttl_hours', 12) * 3600
             offset_seconds = rule.get('advance_minutes', 0) * 60
             now = time.time()
 
             if now >= obtained_at + ttl_seconds + offset_seconds:
-                self._emit_log(f'[预判] 删除 cookie: {cookie_name}', 'report')
+                value_preview = cookie_value[:8] + '...' if len(cookie_value) > 8 else cookie_value
+                self._emit_log(f'[预判] 删除 cookie: {cookie_name} (值: {value_preview})', 'report')
                 await context.clear_cookies(name=cookie_name)
                 self._cookie_obtained_at.pop(cookie_name, None)
 
