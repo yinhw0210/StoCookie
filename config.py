@@ -80,6 +80,7 @@ AUTH_URL_MARKERS = (
     'sto-sso-web',
     'safety-tsportal.sto.cn',
     'login.dingtalk.com',
+    'sso.sto-express.cn',
     '/app_login',
     '/page/expired',
 )

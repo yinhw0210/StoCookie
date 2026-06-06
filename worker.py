@@ -81,6 +81,7 @@ class BackgroundWorker(threading.Thread):
         settings = _load_settings()
         self._collect_interval = settings.get('collect_interval', COLLECT_INTERVAL_MINUTES)
         self._heartbeat_interval = settings.get('heartbeat_interval', HEARTBEAT_INTERVAL_MINUTES)
+        self._countdown_from_start = settings.get('countdown_from_start', False)
         self._proactive_refresh_rules = settings.get('proactive_refresh', [])
         self._cookie_obtained_at: dict[str, tuple[str, float]] = {}
 
@@ -153,25 +154,28 @@ class BackgroundWorker(threading.Thread):
 
                 if self._manual_sync_event.is_set():
                     self._manual_sync_event.clear()
+                    sync_start = time.time()
                     await self._do_sync_cycle(context)
                     if self._pdd:
                         await self._do_pdd_sync_cycle()
-                    last_sync = time.time()
+                    last_sync = sync_start if self._countdown_from_start else time.time()
 
                 now = time.time()
                 sync_due = (now - last_sync) >= self._collect_interval * 60
                 proactive_due = self._check_proactive_refresh_due(now)
 
                 if proactive_due:
+                    sync_start = time.time()
                     await self._do_proactive_refresh(context)
                     if self._pdd:
                         await self._do_pdd_sync_cycle()
-                    last_sync = time.time()
+                    last_sync = sync_start if self._countdown_from_start else time.time()
                 elif sync_due:
+                    sync_start = time.time()
                     await self._do_sync_cycle(context)
                     if self._pdd:
                         await self._do_pdd_sync_cycle()
-                    last_sync = time.time()
+                    last_sync = sync_start if self._countdown_from_start else time.time()
 
                 next_sync = max(0, self._collect_interval * 60 - (time.time() - last_sync))
                 self._emit_status({
@@ -530,6 +534,10 @@ class BackgroundWorker(threading.Thread):
                 await page.wait_for_timeout(2000)
                 self._emit_log(f'reload 后 URL: {page.url}', 'heartbeat')
 
+                # chrome-error:// 页面无法恢复，直接抛异常走重新打开逻辑
+                if 'chrome-error://' in page.url or 'about:blank' in page.url:
+                    raise Exception(f'Page navigated to error: {page.url}')
+
                 if is_auth_url(page.url):
                     # page.sto.cn 和 market-cod 有独立 session，跳转到 SSO 不代表全局过期
                     # 对这些页面单独走登录流程（当前页面已在 SSO，用 skip_navigate）
@@ -549,6 +557,12 @@ class BackgroundWorker(threading.Thread):
                             self._emit_log(f'独立 session 页面登录失败: {url} -> {e}', 'heartbeat')
                     else:
                         self._emit_log(f'常驻页面 reload 后跳转到登录页: {url} → {page.url}', 'heartbeat')
+                        # 关闭停留在认证页的旧页面，以便 _open_persistent_pages 能重新打开
+                        try:
+                            if not page.is_closed():
+                                await page.close()
+                        except Exception:
+                            pass
                         session_expired = True
                         break
 
@@ -561,10 +575,16 @@ class BackgroundWorker(threading.Thread):
                     self._emit_log(f'finance-fundmanage 需要通过搜索入口重新打开', 'heartbeat')
                     await self._reopen_finance_fundmanage(context)
                 else:
+                    # 关闭旧页面，防止标签页泄漏
                     try:
-                        page = await context.new_page()
-                        await page.goto(url, wait_until='domcontentloaded', timeout=15000)
-                        self._persistent_pages[url] = page
+                        if not page.is_closed():
+                            await page.close()
+                    except Exception:
+                        pass
+                    try:
+                        new_page = await context.new_page()
+                        await new_page.goto(url, wait_until='domcontentloaded', timeout=15000)
+                        self._persistent_pages[url] = new_page
                         self._emit_log(f'常驻页面重新打开成功: {url}', 'heartbeat')
                     except Exception as e2:
                         self._emit_log(f'常驻页面重新打开也失败: {url} -> {e2}', 'heartbeat')
