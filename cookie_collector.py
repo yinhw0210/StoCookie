@@ -29,6 +29,7 @@ EXPECTED_REPORT_ITEMS = [
     {'label': 'stoToken (wutonggateway)', 'rule_domain': 'wutonggateway.sto.cn', 'rule_name': 'stoToken'},
     {'label': 'sid_cfo (wutonggateway)', 'rule_domain': 'wutonggateway.sto.cn', 'rule_name': 'sid_cfo'},
     {'label': 'WD_SESSION (wutonggateway)', 'rule_domain': 'wutonggateway.sto.cn', 'rule_name': 'WD_SESSION'},
+    {'label': 'TOKEN (page.sto.cn)', 'rule_domain': 'page.sto.cn', 'rule_name': 'TOKEN'},
     {'label': 'WD_SESSION+TSID 组合', 'combo': True, 'names': ['WD_SESSION', 'TSID']},
     {'label': 'CFO_DOWNLOAD 组合', 'combo': True, 'names': ['sid_cfo', 'WD_SESSION', 'TSID']},
     {'label': 'WD_STO 组合', 'combo': True, 'names': ['stoToken', 'WD_SESSION']},

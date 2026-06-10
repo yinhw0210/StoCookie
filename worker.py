@@ -45,6 +45,7 @@ COOKIE_REPORT_LABELS = {
     'KFSD=': 'KFSD (wangdian全量)',
     'CFO_DOWNLOAD': 'CFO_DOWNLOAD 组合',
     'WD_STO=': 'WD_STO 组合',
+    'TOKEN=': 'TOKEN (page.sto.cn)',
 }
 
 
@@ -447,6 +448,12 @@ class BackgroundWorker(threading.Thread):
         await page.wait_for_timeout(2000)
         await self._dismiss_announcement(page)
         await self._search_and_click(page, WANGDIAN_SEARCH_KEYWORDS[1])
+
+        # 回到 wangdian/index 搜索「网点物料申领报表」触发 TOKEN cookie 生成
+        await page.goto(WANGDIAN_INDEX_URL, wait_until='domcontentloaded', timeout=15000)
+        await page.wait_for_timeout(2000)
+        await self._dismiss_announcement(page)
+        await self._search_and_click(page, WANGDIAN_SEARCH_KEYWORDS[2])
 
     async def _open_persistent_pages(self, context):
         self._emit_log('开始打开常驻页面...', 'general')
