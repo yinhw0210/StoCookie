@@ -427,33 +427,29 @@ class BackgroundWorker(threading.Thread):
             self._emit_log(f'搜索「{keyword}」失败: {e}', 'general')
             return False
 
-    async def _handle_wangdian_index(self, context, page):
+    async def _run_wangdian_searches(self, context, page, *, open_finance_fundmanage: bool = False, log_category: str = 'general'):
+        """在 wangdian/index 依次搜索 WANGDIAN_SEARCH_KEYWORDS，触发对应 Cookie 生成"""
         await self._dismiss_announcement(page)
-
-        # 搜索「结算账户交易明细」触发 cookie 生成
         await self._search_and_click(page, WANGDIAN_SEARCH_KEYWORDS[0])
 
-        # 新开标签页打开 finance-fundmanage
-        try:
-            fm_page = await context.new_page()
-            await fm_page.goto(FINANCE_FUNDMANAGE_URL, wait_until='domcontentloaded', timeout=15000)
-            await fm_page.wait_for_timeout(2000)
-            self._persistent_pages[FINANCE_FUNDMANAGE_URL] = fm_page
-            self._emit_log(f'常驻页面已打开: {FINANCE_FUNDMANAGE_URL}', 'general')
-        except Exception as e:
-            self._emit_log(f'finance-fundmanage 页面打开失败: {e}', 'general')
+        if open_finance_fundmanage:
+            try:
+                fm_page = await context.new_page()
+                await fm_page.goto(FINANCE_FUNDMANAGE_URL, wait_until='domcontentloaded', timeout=15000)
+                await fm_page.wait_for_timeout(2000)
+                self._persistent_pages[FINANCE_FUNDMANAGE_URL] = fm_page
+                self._emit_log(f'常驻页面已打开: {FINANCE_FUNDMANAGE_URL}', log_category)
+            except Exception as e:
+                self._emit_log(f'finance-fundmanage 页面打开失败: {e}', log_category)
 
-        # 回到 wangdian/index 搜索「网点账单」
-        await page.goto(WANGDIAN_INDEX_URL, wait_until='domcontentloaded', timeout=15000)
-        await page.wait_for_timeout(2000)
-        await self._dismiss_announcement(page)
-        await self._search_and_click(page, WANGDIAN_SEARCH_KEYWORDS[1])
+        for keyword in WANGDIAN_SEARCH_KEYWORDS[1:]:
+            await page.goto(WANGDIAN_INDEX_URL, wait_until='domcontentloaded', timeout=15000)
+            await page.wait_for_timeout(2000)
+            await self._dismiss_announcement(page)
+            await self._search_and_click(page, keyword)
 
-        # 回到 wangdian/index 搜索「网点物料申领报表」触发 TOKEN cookie 生成
-        await page.goto(WANGDIAN_INDEX_URL, wait_until='domcontentloaded', timeout=15000)
-        await page.wait_for_timeout(2000)
-        await self._dismiss_announcement(page)
-        await self._search_and_click(page, WANGDIAN_SEARCH_KEYWORDS[2])
+    async def _handle_wangdian_index(self, context, page):
+        await self._run_wangdian_searches(context, page, open_finance_fundmanage=True)
 
     async def _open_persistent_pages(self, context):
         self._emit_log('开始打开常驻页面...', 'general')
@@ -573,8 +569,6 @@ class BackgroundWorker(threading.Thread):
                         session_expired = True
                         break
 
-                if 'wangdian.sto.cn/index' in url:
-                    await self._dismiss_announcement(page)
             except Exception as e:
                 self._emit_log(f'常驻页面 reload 失败: {url} -> {e}', 'heartbeat')
                 # finance-fundmanage 需要通过 wangdian 搜索入口打开，不能直接 goto
@@ -597,6 +591,13 @@ class BackgroundWorker(threading.Thread):
                         self._emit_log(f'常驻页面重新打开也失败: {url} -> {e2}', 'heartbeat')
 
         if not session_expired:
+            wangdian_page = self._persistent_pages.get(WANGDIAN_INDEX_URL)
+            if wangdian_page and not wangdian_page.is_closed() and not is_auth_url(wangdian_page.url):
+                self._emit_log('心跳：重新执行 wangdian 搜索触发 Cookie 生成', 'heartbeat')
+                try:
+                    await self._run_wangdian_searches(context, wangdian_page, log_category='heartbeat')
+                except Exception as e:
+                    self._emit_log(f'心跳 wangdian 搜索失败: {e}', 'heartbeat')
             await context.storage_state(path=STORAGE_STATE_PATH)
         return not session_expired
 
