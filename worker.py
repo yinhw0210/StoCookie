@@ -430,25 +430,19 @@ class BackgroundWorker(threading.Thread):
     async def _run_wangdian_searches(self, context, page, *, open_finance_fundmanage: bool = False, log_category: str = 'general'):
         """在 wangdian/index 依次搜索 WANGDIAN_SEARCH_KEYWORDS，触发对应 Cookie 生成"""
         await self._dismiss_announcement(page)
-        await self._search_and_click(page, WANGDIAN_SEARCH_KEYWORDS[0])
-
-        if open_finance_fundmanage:
-            fm_page = self._persistent_pages.get(FINANCE_FUNDMANAGE_URL)
-            if not fm_page or fm_page.is_closed():
-                try:
-                    fm_page = await context.new_page()
-                    await fm_page.goto(FINANCE_FUNDMANAGE_URL, wait_until='domcontentloaded', timeout=15000)
-                    await fm_page.wait_for_timeout(2000)
-                    self._persistent_pages[FINANCE_FUNDMANAGE_URL] = fm_page
-                    self._emit_log(f'常驻页面已打开: {FINANCE_FUNDMANAGE_URL}', log_category)
-                except Exception as e:
-                    self._emit_log(f'finance-fundmanage 页面打开失败: {e}', log_category)
-
-        for keyword in WANGDIAN_SEARCH_KEYWORDS[1:]:
-            await page.goto(WANGDIAN_INDEX_URL, wait_until='domcontentloaded', timeout=15000)
-            await page.wait_for_timeout(2000)
-            await self._dismiss_announcement(page)
+        for i, keyword in enumerate(WANGDIAN_SEARCH_KEYWORDS):
             await self._search_and_click(page, keyword)
+            if i == 0 and open_finance_fundmanage:
+                fm_page = self._persistent_pages.get(FINANCE_FUNDMANAGE_URL)
+                if not fm_page or fm_page.is_closed():
+                    try:
+                        fm_page = await context.new_page()
+                        await fm_page.goto(FINANCE_FUNDMANAGE_URL, wait_until='domcontentloaded', timeout=15000)
+                        await fm_page.wait_for_timeout(2000)
+                        self._persistent_pages[FINANCE_FUNDMANAGE_URL] = fm_page
+                        self._emit_log(f'常驻页面已打开: {FINANCE_FUNDMANAGE_URL}', log_category)
+                    except Exception as e:
+                        self._emit_log(f'finance-fundmanage 页面打开失败: {e}', log_category)
 
     async def _maybe_run_wangdian_searches(self, context, *, open_finance_fundmanage: bool = False, log_category: str = 'general'):
         """全部常驻页就绪后，在 wangdian/index 执行搜索触发"""
