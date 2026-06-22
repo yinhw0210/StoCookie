@@ -27,6 +27,7 @@ FINANCE_FUNDMANAGE_URL = 'https://finance-fundmanage.sto.cn/prepaidment/prepaid/
 WANGDIAN_NAV_SELECTOR = '.navigation-list-item-content'
 WANGDIAN_ANNOUNCEMENT_CLOSE_SELECTOR = 'a.next-dialog-close'
 WANGDIAN_SEARCH_INPUT_SELECTOR = '.searchMenu-27XOB input[placeholder="支持快捷检索菜单"]'
+WANGDIAN_SEARCH_INPUT_FALLBACK_SELECTOR = 'input[placeholder="支持快捷检索菜单"]'
 WANGDIAN_SEARCH_FIRST_RESULT_SELECTOR = 'ul.headerSearchList-1dSEL a.navigation-list-item-content'
 WANGDIAN_SEARCH_KEYWORDS = ['结算账户交易明细', '网点账单', '网点物料申领报表']
 
