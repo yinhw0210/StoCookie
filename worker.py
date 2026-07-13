@@ -142,6 +142,7 @@ class BackgroundWorker(threading.Thread):
             await self._init_pdd(browser)
 
             last_sync = time.time()
+            last_heartbeat = time.time()
 
             while not self._stop_event.is_set():
                 if self._paused:
@@ -161,9 +162,11 @@ class BackgroundWorker(threading.Thread):
                     if self._pdd:
                         await self._do_pdd_sync_cycle()
                     last_sync = sync_start if self._countdown_from_start else time.time()
+                    last_heartbeat = last_sync
 
                 now = time.time()
                 sync_due = (now - last_sync) >= self._collect_interval * 60
+                heartbeat_due = (now - last_heartbeat) >= self._heartbeat_interval * 60
                 proactive_due = self._check_proactive_refresh_due(now)
 
                 if proactive_due:
@@ -172,17 +175,24 @@ class BackgroundWorker(threading.Thread):
                     if self._pdd:
                         await self._do_pdd_sync_cycle()
                     last_sync = sync_start if self._countdown_from_start else time.time()
+                    last_heartbeat = last_sync
                 elif sync_due:
                     sync_start = time.time()
                     await self._do_sync_cycle(context)
                     if self._pdd:
                         await self._do_pdd_sync_cycle()
                     last_sync = sync_start if self._countdown_from_start else time.time()
+                    last_heartbeat = last_sync
+                elif heartbeat_due:
+                    heartbeat_start = time.time()
+                    await self._do_heartbeat(context)
+                    last_heartbeat = heartbeat_start if self._countdown_from_start else time.time()
 
                 next_sync = max(0, self._collect_interval * 60 - (time.time() - last_sync))
+                next_heartbeat = max(0, self._heartbeat_interval * 60 - (time.time() - last_heartbeat))
                 self._emit_status({
                     'next_collect': int(next_sync),
-                    'next_heartbeat': int(next_sync),
+                    'next_heartbeat': int(next_heartbeat),
                     'paused': False,
                 })
 
@@ -513,6 +523,70 @@ class BackgroundWorker(threading.Thread):
         except Exception as e:
             self._emit_log(f'wangdian 搜索失败: {e}', log_category)
 
+    async def _open_one_persistent_page(self, context, url: str, log_category: str = 'general') -> bool:
+        try:
+            page = await context.new_page()
+            await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+            await page.wait_for_timeout(2000)
+            self._emit_log(f'常驻页面导航完成，当前 URL: {page.url}', log_category)
+
+            if is_auth_url(page.url):
+                if 'page.sto.cn' in url:
+                    # page.sto.cn 有独立 session，SSO 登录后会自动跳转回目标页
+                    # 只需要完成钉钉登录流程，然后等待页面离开 SSO 即可
+                    self._emit_log(f'page.sto.cn 需要独立登录，等待 SSO 完成...', 'login')
+                    try:
+                        await self._do_sso_login_on_page(page)
+                        self._emit_log(f'page.sto.cn 登录完成，当前 URL: {page.url}', 'login')
+                    except Exception as e:
+                        self._emit_log(f'page.sto.cn 登录失败: {e}，跳过此页面', 'login')
+                        await page.close()
+                        return False
+                elif 'market-cod.sto.cn' in url:
+                    # market-cod 有独立 session，当前页面已经在 SSO 页
+                    self._emit_log(f'market-cod 需要独立登录，执行登录流程', 'login')
+                    try:
+                        await self._do_sso_login_on_page(page)
+                        await page.wait_for_timeout(2000)
+                        # 登录后跳转到 /cod/home/index，需要再次导航到目标页
+                        if 'topayment/siteOrder/list' not in page.url:
+                            self._emit_log(f'market-cod 登录后跳转到: {page.url}，再次导航到目标页', log_category)
+                            await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+                            await page.wait_for_timeout(2000)
+                        self._emit_log(f'market-cod 登录完成，当前 URL: {page.url}', 'login')
+                    except Exception as e:
+                        self._emit_log(f'market-cod 登录失败: {e}', 'login')
+                        await page.close()
+                        return False
+                else:
+                    # 其他页面（wangdian 子页面等）共享 wangdian session，不应该出现 SSO
+                    self._emit_log(f'常驻页面意外跳转到登录页: {url} → {page.url}', 'login')
+                    try:
+                        await self._do_sso_login_on_page(page)
+                        await page.wait_for_timeout(2000)
+                        if url not in page.url:
+                            await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+                            await page.wait_for_timeout(2000)
+                    except Exception as e:
+                        self._emit_log(f'常驻页面登录失败: {url} -> {e}', 'login')
+                        await page.close()
+                        return False
+
+            self._persistent_pages[url] = page
+            self._emit_log(f'常驻页面已打开: {url}', log_category)
+            return True
+        except Exception as e:
+            self._emit_log(f'常驻页面打开失败: {url} -> {e}', log_category)
+            return False
+
+    async def _ensure_persistent_pages(self, context, log_category: str = 'heartbeat'):
+        """对照 PERSISTENT_PAGES 补齐未登记的常驻页（如启动时打开失败被跳过的页面）"""
+        for url in PERSISTENT_PAGES:
+            if url in self._persistent_pages:
+                continue
+            self._emit_log(f'常驻页面未登记，尝试补开: {url}', log_category)
+            await self._open_one_persistent_page(context, url, log_category)
+
     async def _open_persistent_pages(self, context):
         self._emit_log('开始打开常驻页面...', 'general')
         for url in PERSISTENT_PAGES:
@@ -523,58 +597,7 @@ class BackgroundWorker(threading.Thread):
                     continue
                 else:
                     self._emit_log(f'常驻页面已关闭，重新打开: {url}', 'general')
-            try:
-                page = await context.new_page()
-                await page.goto(url, wait_until='domcontentloaded', timeout=15000)
-                await page.wait_for_timeout(2000)
-                self._emit_log(f'常驻页面导航完成，当前 URL: {page.url}', 'general')
-
-                if is_auth_url(page.url):
-                    if 'page.sto.cn' in url:
-                        # page.sto.cn 有独立 session，SSO 登录后会自动跳转回目标页
-                        # 只需要完成钉钉登录流程，然后等待页面离开 SSO 即可
-                        self._emit_log(f'page.sto.cn 需要独立登录，等待 SSO 完成...', 'login')
-                        try:
-                            await self._do_sso_login_on_page(page)
-                            self._emit_log(f'page.sto.cn 登录完成，当前 URL: {page.url}', 'login')
-                        except Exception as e:
-                            self._emit_log(f'page.sto.cn 登录失败: {e}，跳过此页面', 'login')
-                            await page.close()
-                            continue
-                    elif 'market-cod.sto.cn' in url:
-                        # market-cod 有独立 session，当前页面已经在 SSO 页
-                        self._emit_log(f'market-cod 需要独立登录，执行登录流程', 'login')
-                        try:
-                            await self._do_sso_login_on_page(page)
-                            await page.wait_for_timeout(2000)
-                            # 登录后跳转到 /cod/home/index，需要再次导航到目标页
-                            if 'topayment/siteOrder/list' not in page.url:
-                                self._emit_log(f'market-cod 登录后跳转到: {page.url}，再次导航到目标页', 'general')
-                                await page.goto(url, wait_until='domcontentloaded', timeout=15000)
-                                await page.wait_for_timeout(2000)
-                            self._emit_log(f'market-cod 登录完成，当前 URL: {page.url}', 'login')
-                        except Exception as e:
-                            self._emit_log(f'market-cod 登录失败: {e}', 'login')
-                            await page.close()
-                            continue
-                    else:
-                        # 其他页面（wangdian 子页面等）共享 wangdian session，不应该出现 SSO
-                        self._emit_log(f'常驻页面意外跳转到登录页: {url} → {page.url}', 'login')
-                        try:
-                            await self._do_sso_login_on_page(page)
-                            await page.wait_for_timeout(2000)
-                            if url not in page.url:
-                                await page.goto(url, wait_until='domcontentloaded', timeout=15000)
-                                await page.wait_for_timeout(2000)
-                        except Exception as e:
-                            self._emit_log(f'常驻页面登录失败: {url} -> {e}', 'login')
-                            await page.close()
-                            continue
-
-                self._persistent_pages[url] = page
-                self._emit_log(f'常驻页面已打开: {url}', 'general')
-            except Exception as e:
-                self._emit_log(f'常驻页面打开失败: {url} -> {e}', 'general')
+            await self._open_one_persistent_page(context, url, 'general')
         # 关闭 _do_login 遗留的登录页面
         await self._close_login_page()
         fm_page = self._persistent_pages.get(FINANCE_FUNDMANAGE_URL)
@@ -588,6 +611,7 @@ class BackgroundWorker(threading.Thread):
 
     async def _reload_persistent_pages(self, context) -> bool:
         session_expired = False
+        await self._ensure_persistent_pages(context, log_category='heartbeat')
         self._emit_log(f'reload 常驻页面: {len(self._persistent_pages)} 个', 'heartbeat')
         for url, page in list(self._persistent_pages.items()):
             try:
