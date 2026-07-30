@@ -53,7 +53,7 @@ COOKIE_REPORT_LABELS = {
 def _load_settings() -> dict:
     if os.path.exists(SETTINGS_PATH):
         try:
-            with open(SETTINGS_PATH, 'r') as f:
+            with open(SETTINGS_PATH, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except Exception:
             pass
@@ -838,22 +838,12 @@ class BackgroundWorker(threading.Thread):
                     cookie_value = self._extract_cookie_value(payload, cookie_name)
 
                     if cookie_name not in self._cookie_obtained_at:
-                        obtained_at = time.time()
-                        # spf_sid 在 12h 内恒定不变，从持久化记录恢复真实获取时间
-                        if cookie_name == 'spf_sid':
-                            restored = self._restore_spf_sid_time(cookie_value)
-                            if restored is not None:
-                                obtained_at = restored
-                        self._cookie_obtained_at[cookie_name] = (cookie_value, obtained_at)
-                        if cookie_name == 'spf_sid':
-                            self._persist_spf_sid_time(cookie_value, obtained_at)
+                        self._cookie_obtained_at[cookie_name] = (cookie_value, time.time())
                         self._emit_log(f'[预判] 首次记录 {cookie_name}', 'report')
                     else:
                         old_value, old_time = self._cookie_obtained_at[cookie_name]
                         if cookie_value != old_value:
                             self._cookie_obtained_at[cookie_name] = (cookie_value, time.time())
-                            if cookie_name == 'spf_sid':
-                                self._persist_spf_sid_time(cookie_value, time.time())
                             self._emit_log(f'[预判] {cookie_name} 值变化，重置倒计时', 'report')
                     break
 
