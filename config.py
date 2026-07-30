@@ -21,7 +21,6 @@ PERSISTENT_PAGES = [
     'https://wangdian.sto.cn/index',
 ]
 
-PAGE_STO_URL = 'https://page.sto.cn/ux/manipulate-center/index.html#/'
 
 FINANCE_FUNDMANAGE_URL = 'https://finance-fundmanage.sto.cn/prepaidment/prepaid/common/getBizType.action?showLevel=1'
 
@@ -30,7 +29,7 @@ WANGDIAN_ANNOUNCEMENT_CLOSE_SELECTOR = 'a.next-dialog-close'
 WANGDIAN_SEARCH_INPUT_SELECTOR = '.searchMenu-27XOB input[placeholder="支持快捷检索菜单"]'
 WANGDIAN_SEARCH_INPUT_FALLBACK_SELECTOR = 'input[placeholder="支持快捷检索菜单"]'
 WANGDIAN_SEARCH_FIRST_RESULT_SELECTOR = 'ul.headerSearchList-1dSEL a.navigation-list-item-content'
-WANGDIAN_SEARCH_KEYWORDS = ['结算账户交易明细', '网点账单', '网点物料申领报表']
+WANGDIAN_SEARCH_KEYWORDS = ['结算账户交易明细', '网点账单', '网点物料申领报表', '订单查询']
 
 COOKIE_RULES = [
     ('finance-mng.sto.cn', 'SESSION', lambda n, v: f'{n}={v}'),

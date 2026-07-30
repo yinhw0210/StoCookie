@@ -5,11 +5,6 @@
     "pdd_enabled": true,
     "pdd_account": "17753992017",
     "pdd_password": "sto9600999*",
-    "proactive_refresh": [
-        {
-            "cookie_name": "spf_sid",
-            "ttl_hours": 12,
-            "advance_minutes": 5
-        }
-    ]
+    "_proactive_refresh_disabled": "TODO: 改为基于 spf_sid 探测协程的实时过期检测，届时恢复此配置",
+    "proactive_refresh": []
 }
