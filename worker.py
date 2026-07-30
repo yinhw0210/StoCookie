@@ -14,6 +14,7 @@ from config import (
     FINANCE_FUNDMANAGE_URL,
     HEARTBEAT_INTERVAL_MINUTES,
     LOG_DIR,
+    PAGE_STO_URL,
     PERSISTENT_PAGES,
     SETTINGS_PATH,
     SSO_URL,
@@ -79,6 +80,9 @@ class BackgroundWorker(threading.Thread):
         self._response_listener_registered = False
         self._persistent_pages: dict[str, object] = {}
         self._pdd = None
+        self._browser = None
+        self._page_sto_ctx = None
+        self._page_sto_page = None
 
         settings = _load_settings()
         self._collect_interval = settings.get('collect_interval', COLLECT_INTERVAL_MINUTES)
@@ -118,6 +122,7 @@ class BackgroundWorker(threading.Thread):
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=False)
+            self._browser = browser
 
             if os.path.exists(STORAGE_STATE_PATH):
                 self._emit_log('恢复已有 Session...', 'login')
@@ -140,6 +145,9 @@ class BackgroundWorker(threading.Thread):
 
             # PDD 站点初始化
             await self._init_pdd(browser)
+
+            # page.sto 独立 context 初始化（产生 spf_sid）
+            await self._init_page_sto(browser)
 
             last_sync = time.time()
             last_heartbeat = time.time()
@@ -174,6 +182,8 @@ class BackgroundWorker(threading.Thread):
                     await self._do_proactive_refresh(context)
                     if self._pdd:
                         await self._do_pdd_sync_cycle()
+                    if self._page_sto_ctx:
+                        await self._do_page_sto_sync()
                     last_sync = sync_start if self._countdown_from_start else time.time()
                     last_heartbeat = last_sync
                 elif sync_due:
@@ -181,11 +191,15 @@ class BackgroundWorker(threading.Thread):
                     await self._do_sync_cycle(context)
                     if self._pdd:
                         await self._do_pdd_sync_cycle()
+                    if self._page_sto_ctx:
+                        await self._do_page_sto_sync()
                     last_sync = sync_start if self._countdown_from_start else time.time()
                     last_heartbeat = last_sync
                 elif heartbeat_due:
                     heartbeat_start = time.time()
                     await self._do_heartbeat(context)
+                    if self._page_sto_ctx:
+                        await self._do_page_sto_sync()
                     last_heartbeat = heartbeat_start if self._countdown_from_start else time.time()
 
                 next_sync = max(0, self._collect_interval * 60 - (time.time() - last_sync))
@@ -531,18 +545,7 @@ class BackgroundWorker(threading.Thread):
             self._emit_log(f'常驻页面导航完成，当前 URL: {page.url}', log_category)
 
             if is_auth_url(page.url):
-                if 'page.sto.cn' in url:
-                    # page.sto.cn 有独立 session，SSO 登录后会自动跳转回目标页
-                    # 只需要完成钉钉登录流程，然后等待页面离开 SSO 即可
-                    self._emit_log(f'page.sto.cn 需要独立登录，等待 SSO 完成...', 'login')
-                    try:
-                        await self._do_sso_login_on_page(page)
-                        self._emit_log(f'page.sto.cn 登录完成，当前 URL: {page.url}', 'login')
-                    except Exception as e:
-                        self._emit_log(f'page.sto.cn 登录失败: {e}，跳过此页面', 'login')
-                        await page.close()
-                        return False
-                elif 'market-cod.sto.cn' in url:
+                if 'market-cod.sto.cn' in url:
                     # market-cod 有独立 session，当前页面已经在 SSO 页
                     self._emit_log(f'market-cod 需要独立登录，执行登录流程', 'login')
                     try:
@@ -632,9 +635,9 @@ class BackgroundWorker(threading.Thread):
                     raise Exception(f'Page navigated to error: {page.url}')
 
                 if is_auth_url(page.url):
-                    # page.sto.cn 和 market-cod 有独立 session，跳转到 SSO 不代表全局过期
+                    # market-cod 有独立 session，跳转到 SSO 不代表全局过期
                     # 对这些页面单独走登录流程（当前页面已在 SSO，用 skip_navigate）
-                    if 'page.sto.cn' in url or 'market-cod.sto.cn' in url:
+                    if 'market-cod.sto.cn' in url:
                         self._emit_log(f'独立 session 页面需要重新登录: {url}', 'heartbeat')
                         try:
                             await self._do_sso_login_on_page(page)
@@ -758,6 +761,21 @@ class BackgroundWorker(threading.Thread):
             payloads = await collect_cookies(context)
             self._emit_log(f'Cookie 采集完成: {len(payloads)} 条待上报', 'report')
 
+            # 从 page.sto 独立 context 采集 spf_sid
+            if self._page_sto_ctx:
+                try:
+                    sto_cookies = await self._page_sto_ctx.cookies()
+                    for c in sto_cookies:
+                        if c['name'] == 'spf_sid':
+                            payload = f"spf_sid={c['value']}"
+                            # 避免重复（如果主 context 已有）
+                            if payload not in payloads:
+                                payloads.append(payload)
+                                self._emit_log(f'[采集] ✓ 从 page.sto context 采集 spf_sid', 'report')
+                            break
+                except Exception as e:
+                    self._emit_log(f'[page.sto] 采集 spf_sid 异常: {e}', 'report')
+
             # 记录配置中关注的 cookie 获取时间（用于预判刷新）
             self._record_cookie_obtained_time(payloads)
 
@@ -874,7 +892,10 @@ class BackgroundWorker(threading.Thread):
         return False
 
     async def _do_proactive_refresh(self, context):
-        """预判刷新：删除过期/即将过期的 cookie，然后走正常同步流程"""
+        """预判刷新：删除过期/即将过期的 cookie，然后走正常同步流程。
+        对于 spf_sid 这类 cookie，通过重建 page.sto 独立 context 来刷新。"""
+        need_recreate_page_sto = False
+
         for rule in self._proactive_refresh_rules:
             cookie_name = rule['cookie_name']
             record = self._cookie_obtained_at.get(cookie_name)
@@ -888,11 +909,98 @@ class BackgroundWorker(threading.Thread):
 
             if now >= obtained_at + ttl_seconds + offset_seconds:
                 value_preview = cookie_value[:8] + '...' if len(cookie_value) > 8 else cookie_value
-                self._emit_log(f'[预判] 删除 cookie: {cookie_name} (值: {value_preview})', 'report')
-                await context.clear_cookies(name=cookie_name)
+                self._emit_log(f'[预判] {cookie_name} 已过期 (值: {value_preview})', 'report')
                 self._cookie_obtained_at.pop(cookie_name, None)
+                if cookie_name == 'spf_sid':
+                    need_recreate_page_sto = True
+
+        if need_recreate_page_sto:
+            self._emit_log('[预判] 重建 page.sto 独立 context 以刷新 spf_sid', 'report')
+            await self._init_page_sto(self._browser, force_recreate=True)
 
         await self._do_sync_cycle(context)
+
+    async def _init_page_sto(self, browser, force_recreate=False):
+        """初始化 page.sto 独立 context（像 PDD 一样独立管理）。
+        用于产生 spf_sid cookie。force_recreate=True 时先销毁旧 context 再重建。"""
+        if force_recreate and self._page_sto_ctx:
+            self._emit_log('[page.sto] 销毁旧 context 准备重建...', 'report')
+            try:
+                if self._page_sto_page and not self._page_sto_page.is_closed():
+                    await self._page_sto_page.close()
+            except Exception:
+                pass
+            try:
+                await self._page_sto_ctx.close()
+            except Exception:
+                pass
+            self._page_sto_ctx = None
+            self._page_sto_page = None
+
+        if self._page_sto_ctx:
+            return
+
+        try:
+            self._emit_log('[page.sto] 创建独立 context...', 'report')
+            self._page_sto_ctx = await browser.new_context()
+            self._page_sto_page = await self._page_sto_ctx.new_page()
+
+            await self._page_sto_page.goto(PAGE_STO_URL, wait_until='domcontentloaded', timeout=15000)
+            await self._page_sto_page.wait_for_timeout(2000)
+            self._emit_log(f'[page.sto] 导航完成，当前 URL: {self._page_sto_page.url}', 'report')
+
+            if is_auth_url(self._page_sto_page.url):
+                self._emit_log('[page.sto] 检测到 SSO 跳转，执行钉钉登录...', 'report')
+                try:
+                    await self._do_sso_login_on_page(self._page_sto_page)
+                    self._emit_log(f'[page.sto] SSO 完成，当前 URL: {self._page_sto_page.url}', 'report')
+                except Exception as e:
+                    self._emit_log(f'[page.sto] SSO 登录失败: {e}', 'report')
+                    await self._page_sto_ctx.close()
+                    self._page_sto_ctx = None
+                    self._page_sto_page = None
+                    return
+
+            # 检查 spf_sid 是否产生
+            cookies = await self._page_sto_ctx.cookies()
+            spf = next((c for c in cookies if c['name'] == 'spf_sid'), None)
+            if spf:
+                self._emit_log(f'[page.sto] ✓ spf_sid 已产生 (值: {spf["value"][:8]}...)', 'report')
+                self._cookie_obtained_at['spf_sid'] = (spf['value'], time.time())
+            else:
+                self._emit_log('[page.sto] ⚠ spf_sid 未产生，后续同步周期会重试', 'report')
+        except Exception as e:
+            self._emit_log(f'[page.sto] 初始化失败: {e}', 'report')
+            if self._page_sto_ctx:
+                try:
+                    await self._page_sto_ctx.close()
+                except Exception:
+                    pass
+            self._page_sto_ctx = None
+            self._page_sto_page = None
+
+    async def _do_page_sto_sync(self):
+        """page.sto 独立 context 的同步：reload 页面、检测 session、触发登录。"""
+        if not self._page_sto_ctx or not self._page_sto_page:
+            return
+        try:
+            if self._page_sto_page.is_closed():
+                self._emit_log('[page.sto] 页面已关闭，重新打开...', 'heartbeat')
+                self._page_sto_page = await self._page_sto_ctx.new_page()
+                await self._page_sto_page.goto(PAGE_STO_URL, wait_until='domcontentloaded', timeout=15000)
+            else:
+                await self._page_sto_page.reload(wait_until='domcontentloaded', timeout=15000)
+
+            await self._page_sto_page.wait_for_timeout(2000)
+
+            if is_auth_url(self._page_sto_page.url):
+                self._emit_log('[page.sto] reload 后跳转到 SSO，执行登录...', 'heartbeat')
+                try:
+                    await self._do_sso_login_on_page(self._page_sto_page)
+                except Exception as e:
+                    self._emit_log(f'[page.sto] SSO 登录失败: {e}', 'heartbeat')
+        except Exception as e:
+            self._emit_log(f'[page.sto] 同步异常: {e}', 'heartbeat')
 
     async def _do_sync_cycle(self, context):
         self._emit_status({'sync': '同步中...', 'heartbeat': '检测中...'})

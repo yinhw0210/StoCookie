@@ -1,7 +1,7 @@
 {
     "collect_interval": 60,
     "heartbeat_interval": 30,
-    "countdown_from_start": false,
+    "countdown_from_start": true,
     "pdd_enabled": true,
     "pdd_account": "17753992017",
     "pdd_password": "sto9600999*",

@@ -14,13 +14,14 @@ SETTINGS_PATH = os.path.join(BASE_DIR, 'settings.json')
 STORAGE_STATE_PATH = os.path.join(STORAGE_DIR, 'state.json')
 
 PERSISTENT_PAGES = [
-    'https://page.sto.cn/ux/manipulate-center/index.html#/',
     'https://front.sto.cn/group/customerCenter#/',
     'https://wangdian.sto.cn/page/fin-center/settlement/new-outbound-settlement',
     'https://wangdian.sto.cn/page/external/hq-fin-center/report/policy/transfer/rebate',
     'https://market-cod.sto.cn/cod/topayment/siteOrder/list',
     'https://wangdian.sto.cn/index',
 ]
+
+PAGE_STO_URL = 'https://page.sto.cn/ux/manipulate-center/index.html#/'
 
 FINANCE_FUNDMANAGE_URL = 'https://finance-fundmanage.sto.cn/prepaidment/prepaid/common/getBizType.action?showLevel=1'
 
