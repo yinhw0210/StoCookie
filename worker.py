@@ -896,24 +896,50 @@ class BackgroundWorker(threading.Thread):
 
     async def _probe_spf_sid_loop(self, context):
         """spf_sid 探测协程：独立 page，随机间隔打开订单查询页面，
-        检测 spf_sid 值变化。新值存储并触发上报，cookie 缺失则重新登录。"""
+        检测 spf_sid 值变化。新值存储并触发上报，cookie 缺失则重新登录。
+        搜索失败会回到 wangdian 首页重试（最多 3 次），全失败才触发登录。"""
         import random
+        MAX_RETRIES = 3
         self._emit_log('[spf_sid探测] 协程启动', 'report')
         probe_page = None
         try:
             probe_page = await context.new_page()
             while not self._stop_event.is_set():
-                try:
-                    await probe_page.goto(WANGDIAN_INDEX_URL, wait_until='domcontentloaded', timeout=15000)
-                    await probe_page.wait_for_timeout(2000)
-                    await self._dismiss_announcement(probe_page, 'spf_probe')
-                    await self._search_and_click(probe_page, '订单查询', 'spf_probe')
+                search_ok = False
 
+                for attempt in range(1, MAX_RETRIES + 1):
+                    try:
+                        self._emit_log(f'[spf_sid探测] 第{attempt}次尝试...', 'report')
+                        await probe_page.goto(WANGDIAN_INDEX_URL, wait_until='domcontentloaded', timeout=15000)
+                        await probe_page.wait_for_timeout(2000)
+                        await self._dismiss_announcement(probe_page, 'spf_probe')
+                        await self._search_and_click(probe_page, '订单查询', 'spf_probe')
+                        # 等待订单查询 API 完成（接口可能较慢）
+                        await probe_page.wait_for_timeout(5000)
+                        search_ok = True
+                        break
+                    except Exception as e:
+                        if attempt < MAX_RETRIES:
+                            self._emit_log(f'[spf_sid探测] 搜索失败({attempt}/{MAX_RETRIES}): {e}，重试...', 'report')
+                        else:
+                            self._emit_log(f'[spf_sid探测] 搜索全部失败({MAX_RETRIES}/{MAX_RETRIES}): {e}', 'report')
+
+                if not search_ok:
+                    self._emit_log(f'[spf_sid探测] 订单查询不可用，触发重新登录', 'report')
+                    try:
+                        await self._do_login(context)
+                        await self._open_persistent_pages(context)
+                        self._known_spf_sid_values.clear()
+                        await self._do_collect_and_report(context)
+                        self._emit_combined_sync_status()
+                    except Exception as e2:
+                        self._emit_log(f'[spf_sid探测] 重新登录也失败: {e2}', 'report')
+                else:
                     cookies = await context.cookies()
                     spf = next((c for c in cookies if c['name'] == 'spf_sid'), None)
 
                     if not spf:
-                        self._emit_log('[spf_sid探测] ✗ spf_sid 缺失，触发重新登录', 'report')
+                        self._emit_log('[spf_sid探测] ✗ spf_sid 仍缺失，触发重新登录', 'report')
                         await self._do_login(context)
                         await self._open_persistent_pages(context)
                         self._known_spf_sid_values.clear()
@@ -928,17 +954,6 @@ class BackgroundWorker(threading.Thread):
                             self._emit_combined_sync_status()
                         else:
                             self._emit_log(f'[spf_sid探测] spf_sid 未变化，跳过', 'report')
-
-                except Exception as e:
-                    self._emit_log(f'[spf_sid探测] 异常: {e}，触发重新登录', 'report')
-                    try:
-                        await self._do_login(context)
-                        await self._open_persistent_pages(context)
-                        self._known_spf_sid_values.clear()
-                        await self._do_collect_and_report(context)
-                        self._emit_combined_sync_status()
-                    except Exception as e2:
-                        self._emit_log(f'[spf_sid探测] 重新登录也失败: {e2}', 'report')
 
                 interval = random.choice([30, 60, 180])
                 self._emit_log(f'[spf_sid探测] 下一轮探测在 {interval}s 后', 'report')
