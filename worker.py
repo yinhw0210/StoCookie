@@ -83,6 +83,7 @@ class BackgroundWorker(threading.Thread):
         self._browser = None
         self._page_sto_ctx = None
         self._page_sto_page = None
+        self._main_context = None
 
         settings = _load_settings()
         self._collect_interval = settings.get('collect_interval', COLLECT_INTERVAL_MINUTES)
@@ -132,6 +133,7 @@ class BackgroundWorker(threading.Thread):
                 context = await browser.new_context()
 
             self._register_wangdian_trigger(context)
+            self._main_context = context  # 保存主 context 引用，供 page.sto 独立 context 复制 cookie
 
             login_ok = await self._ensure_logged_in(context, 'startup')
             if login_ok:
@@ -943,6 +945,19 @@ class BackgroundWorker(threading.Thread):
         try:
             self._emit_log('[page.sto] 创建独立 context...', 'report')
             self._page_sto_ctx = await browser.new_context()
+
+            # 从主 context 复制钉钉登录态 cookie，使 SSO 能走快速通道（头像选择而非完整登录）
+            DINGTALK_DOMAINS = ('.dingtalk.com', 'login.dingtalk.com')
+            if self._main_context:
+                try:
+                    main_cookies = await self._main_context.cookies()
+                    dd_cookies = [c for c in main_cookies if c.get('domain', '') in DINGTALK_DOMAINS]
+                    if dd_cookies:
+                        await self._page_sto_ctx.add_cookies(dd_cookies)
+                        self._emit_log(f'[page.sto] 已从主 context 复制 {len(dd_cookies)} 个钉钉 cookie', 'report')
+                except Exception as e:
+                    self._emit_log(f'[page.sto] 复制钉钉 cookie 失败: {e}', 'report')
+
             self._page_sto_page = await self._page_sto_ctx.new_page()
 
             await self._page_sto_page.goto(PAGE_STO_URL, wait_until='domcontentloaded', timeout=15000)
@@ -955,11 +970,8 @@ class BackgroundWorker(threading.Thread):
                     await self._do_sso_login_on_page(self._page_sto_page)
                     self._emit_log(f'[page.sto] SSO 完成，当前 URL: {self._page_sto_page.url}', 'report')
                 except Exception as e:
-                    self._emit_log(f'[page.sto] SSO 登录失败: {e}', 'report')
-                    await self._page_sto_ctx.close()
-                    self._page_sto_ctx = None
-                    self._page_sto_page = None
-                    return
+                    self._emit_log(f'[page.sto] SSO 登录失败: {e}，保留页面以便排查', 'report')
+                    # 不关闭 context，保留页面供人工排查
 
             # 检查 spf_sid 是否产生
             cookies = await self._page_sto_ctx.cookies()
