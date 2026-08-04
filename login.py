@@ -244,7 +244,7 @@ async def click_safety_quick_login_if_present(page: Page) -> bool:
     return True
 
 
-async def wait_for_wangdian_entry_or_role(page: Page, timeout_ms: int = 60000) -> None:
+async def wait_for_wangdian_entry_or_role(page: Page, timeout_ms: int = 120000) -> None:
     """等待进入网点系统；必要时处理虎盾快速登录和角色选择页。"""
     deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
     dingtalk_attempted = False

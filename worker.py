@@ -569,22 +569,22 @@ class BackgroundWorker(threading.Thread):
             self._emit_log(f'常驻页面导航完成，当前 URL: {page.url}', log_category)
 
             if is_auth_url(page.url):
-                if 'page.sto.cn' in url:
-                    # page.sto.cn 有独立 session，SSO 登录后会自动跳转回目标页
-                    self._emit_log(f'page.sto.cn 需要独立登录，执行登录流程', 'login')
-                    try:
-                        await self._do_sso_login_on_page(page)
-                        await page.wait_for_timeout(2000)
-                        # 若登录后未回到实操中心，重新导航
-                        if url not in page.url:
-                            await page.goto(url, wait_until='domcontentloaded', timeout=15000)
-                            await page.wait_for_timeout(2000)
-                        self._emit_log(f'page.sto.cn 登录完成，当前 URL: {page.url}', 'login')
-                    except Exception as e:
-                        self._emit_log(f'page.sto.cn 登录失败: {e}，跳过此页面', 'login')
-                        await page.close()
-                        return False
-                elif 'market-cod.sto.cn' in url:
+                # TODO: 实操中心暂不需要（TOKEN 由订单查询页产生），需要时恢复以下分支：
+                # if 'page.sto.cn' in url:
+                #     self._emit_log(f'page.sto.cn 需要独立登录，执行登录流程', 'login')
+                #     try:
+                #         await self._do_sso_login_on_page(page)
+                #         await page.wait_for_timeout(3000)
+                #         if url not in page.url:
+                #             await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+                #             await page.wait_for_timeout(3000)
+                #         token_ok = await self._ensure_page_sto_token(page)
+                #         self._emit_log(f'page.sto.cn 登录完成，TOKEN 生成: {token_ok}，当前 URL: {page.url}', 'login')
+                #     except Exception as e:
+                #         self._emit_log(f'page.sto.cn 登录失败: {e}，跳过此页面', 'login')
+                #         await page.close()
+                #         return False
+                if 'market-cod.sto.cn' in url:
                     # market-cod 有独立 session，当前页面已经在 SSO 页
                     self._emit_log(f'market-cod 需要独立登录，执行登录流程', 'login')
                     try:
@@ -673,9 +673,9 @@ class BackgroundWorker(threading.Thread):
                     raise Exception(f'Page navigated to error: {page.url}')
 
                 if is_auth_url(page.url):
-                    # market-cod / page.sto.cn 有独立 session，跳转到 SSO 不代表全局过期
-                    # 对这些页面单独走登录流程（当前页面已在 SSO，用 skip_navigate）
-                    if 'market-cod.sto.cn' in url or 'page.sto.cn' in url:
+                    # market-cod 有独立 session，跳转到 SSO 不代表全局过期
+                    # （page.sto.cn 实操中心已暂不启用）
+                    if 'market-cod.sto.cn' in url:
                         self._emit_log(f'独立 session 页面需要重新登录: {url}', 'heartbeat')
                         try:
                             await self._do_sso_login_on_page(page)
@@ -686,6 +686,9 @@ class BackgroundWorker(threading.Thread):
                             if 'market-cod.sto.cn' in url and 'topayment/siteOrder/list' not in page.url:
                                 await page.goto(url, wait_until='domcontentloaded', timeout=15000)
                                 await page.wait_for_timeout(2000)
+                            # page.sto.cn 登录后等待实操中心换取 TOKEN（实操中心已暂不启用）
+                            # if 'page.sto.cn' in url:
+                            #     await self._ensure_page_sto_token(page)
                             self._emit_log(f'独立 session 页面重新登录完成: {url}', 'heartbeat')
                         except Exception as e:
                             self._emit_log(f'独立 session 页面登录失败: {url} -> {e}', 'heartbeat')
@@ -960,8 +963,19 @@ class BackgroundWorker(threading.Thread):
                         await probe_page.wait_for_timeout(2000)
                         await self._dismiss_announcement(probe_page, 'spf_probe')
                         await self._search_and_click(probe_page, '订单查询', 'spf_probe')
-                        # 等待订单查询 API 完成（接口可能较慢）
-                        await probe_page.wait_for_timeout(5000)
+                        # 等待订单查询页完全加载：前端用 SSO_TOKEN 换取 TOKEN 并种下
+                        # 同时 spf_sid 也会在此过程中产生（接口可能较慢，轮询等待）
+                        token_ready = False
+                        for _ in range(10):
+                            await probe_page.wait_for_timeout(1500)
+                            cookies = await context.cookies('https://page.sto.cn')
+                            if any(c['name'] == 'TOKEN' for c in cookies):
+                                token_ready = True
+                                break
+                        self._emit_log(
+                            f'[spf_sid探测] 订单查询页加载完成，TOKEN 就绪: {token_ready}',
+                            'report',
+                        )
                         search_ok = True
                         break
                     except Exception as e:

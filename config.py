@@ -12,7 +12,8 @@ BROWSERS_DIR = os.path.join(BASE_DIR, 'browsers')
 SETTINGS_PATH = os.path.join(BASE_DIR, 'settings.json')
 
 PERSISTENT_PAGES = [
-    'https://page.sto.cn/ux/manipulate-center/index.html#/',
+    # TODO: 实操中心暂不需要（TOKEN 由订单查询页产生），需要时恢复：
+    # 'https://page.sto.cn/ux/manipulate-center/index.html#/',
     'https://front.sto.cn/group/customerCenter#/',
     'https://wangdian.sto.cn/page/fin-center/settlement/new-outbound-settlement',
     'https://wangdian.sto.cn/page/external/hq-fin-center/report/policy/transfer/rebate',
