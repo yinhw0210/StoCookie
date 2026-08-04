@@ -70,14 +70,21 @@ async def _dismiss_cookie_dialog(frame: Frame) -> None:
 
 
 async def _click_avatar(frame: Frame) -> None:
-    """点击用户头像触发登录确认流程"""
+    """点击用户头像触发登录确认流程（带重试，应对加载慢的情况）"""
     avatar = frame.locator('.module-qrcode-user-avatar')
-    if await avatar.first.is_visible(timeout=5000):
-        await avatar.first.click()
-        logger.info('已点击用户头像')
-        await frame.page.wait_for_timeout(1500)
-    else:
-        raise RuntimeError('未找到用户头像')
+    for attempt in range(3):
+        try:
+            if await avatar.first.is_visible(timeout=5000):
+                await avatar.first.click()
+                logger.info('已点击用户头像')
+                await frame.page.wait_for_timeout(1500)
+                return
+        except Exception:
+            pass
+        if attempt < 2:
+            logger.info(f'头像未加载，{3-attempt}s 后重试...')
+            await frame.page.wait_for_timeout(3000)
+    raise RuntimeError('未找到用户头像')
 
 
 async def _click_confirm_login(frame: Frame) -> None:
