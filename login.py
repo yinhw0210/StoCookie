@@ -186,6 +186,21 @@ async def select_first_role_if_present(page: Page) -> bool:
     if not has_role_page and not has_role_item:
         return False
 
+    # 角色选择页默认已选中第一个角色，直接点「进入系统」；
+    # 若默认未选中导致失败，再回退点击第一个角色项
+    entry_button = page.locator(ROLE_ENTRY_BUTTON_SELECTOR)
+    try:
+        if await entry_button.first.is_visible(timeout=3000):
+            await entry_button.first.click()
+            logger.info('已点击「进入系统」')
+            await page.wait_for_url(
+                lambda url: is_logged_in_url(url),
+                timeout=30000,
+            )
+            return True
+    except Exception:
+        pass
+
     try:
         await role_items.first.wait_for(state='visible', timeout=5000)
     except Exception:
@@ -194,7 +209,6 @@ async def select_first_role_if_present(page: Page) -> bool:
     await role_items.first.click()
     logger.info('已选择第一个关联工号')
 
-    entry_button = page.locator(ROLE_ENTRY_BUTTON_SELECTOR)
     if not await entry_button.first.is_visible(timeout=5000):
         raise RuntimeError('未找到「进入系统」按钮')
 
@@ -284,6 +298,14 @@ async def login_via_dingtalk(page: Page, skip_navigate: bool = False) -> bool:
     if not skip_navigate:
         await page.goto(SSO_URL)
         await page.wait_for_timeout(3000)
+        logger.info(f'[登录] goto 后 URL: {page.url}')
+        # 记录 wangdian/sto 域关键 cookie 是否存在，判断 SSO 是否种了认证 cookie
+        try:
+            cookies = await page.context.cookies(['https://wangdian.sto.cn', 'https://page.sto.cn'])
+            names = sorted(c['name'] for c in cookies)
+            logger.info(f'[登录] goto 后 wangdian/page 域 cookie: {names}')
+        except Exception as e:
+            logger.warning(f'[登录] 读取 cookie 失败: {e}')
 
         if is_logged_in_url(page.url):
             logger.info(f'网点系统入口未跳转认证页，已登录: {page.url}')
@@ -320,6 +342,14 @@ async def login_via_dingtalk(page: Page, skip_navigate: bool = False) -> bool:
         raise
     finally:
         await _finish_confirm_task(confirm_task)
+
+    logger.info(f'[登录] 流程结束 URL: {page.url}')
+    try:
+        cookies = await page.context.cookies()
+        sto_names = sorted(c['name'] for c in cookies if 'sto.cn' in c.get('domain', ''))
+        logger.info(f'[登录] sto 域 cookie: {sto_names}')
+    except Exception as e:
+        logger.warning(f'[登录] 读取 cookie 失败: {e}')
 
     logger.info('钉钉登录成功')
     return True

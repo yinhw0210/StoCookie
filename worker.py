@@ -271,6 +271,16 @@ class BackgroundWorker(threading.Thread):
                 self._emit_log('登录成功', 'login')
                 return True
             except Exception as e:
+                # 记录失败时的页面 URL 和关键 cookie，便于定位 403 循环根因
+                try:
+                    self._emit_log(f'[登录失败诊断] 当前 URL: {page.url}', 'login')
+                    cookies = await context.cookies()
+                    sto_names = sorted(c['name'] for c in cookies if 'sto.cn' in c.get('domain', ''))
+                    wd_names = sorted(c['name'] for c in cookies if c.get('domain', '').endswith('wangdian.sto.cn'))
+                    self._emit_log(f'[登录失败诊断] sto 域 cookie: {sto_names}', 'login')
+                    self._emit_log(f'[登录失败诊断] wangdian 域 cookie: {wd_names}', 'login')
+                except Exception as e2:
+                    self._emit_log(f'[登录失败诊断] 采集诊断信息失败: {e2}', 'login')
                 if attempt < 2:
                     self._emit_log(f'登录失败({attempt+1}/3)，30秒后重试: {e}', 'login')
                     await asyncio.sleep(30)
