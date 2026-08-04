@@ -323,11 +323,27 @@ class BackgroundWorker(threading.Thread):
 
         if await click_safety_quick_login_if_present(page):
             await page.wait_for_timeout(3000)
+            # 虎盾后可能直接进入角色选择页，先处理
+            try:
+                from login import _select_first_role_and_enter
+                if await _select_first_role_and_enter(page):
+                    await page.wait_for_timeout(2000)
+                    return
+            except Exception as e:
+                self._emit_log(f'角色选择处理异常: {e}', 'login')
             if not is_auth_url(page.url):
                 return  # 已离开认证页，成功
             # 仍在认证页，检查是否有钉钉 iframe
             if not await _has_dingtalk_frame(page):
                 await page.wait_for_timeout(3000)
+                # 再次检查角色页
+                try:
+                    from login import _select_first_role_and_enter
+                    if await _select_first_role_and_enter(page):
+                        await page.wait_for_timeout(2000)
+                        return
+                except Exception as e:
+                    self._emit_log(f'角色选择处理异常: {e}', 'login')
                 if not is_auth_url(page.url):
                     return
                 self._emit_log('虎盾快速登录后仍在认证页，尝试钉钉流程', 'login')
@@ -343,9 +359,17 @@ class BackgroundWorker(threading.Thread):
             await _click_avatar(dd_frame)
             await _click_confirm_login(dd_frame)
             await _click_consent(dd_frame)
-            # 等待页面离开 SSO（不要求进入 wangdian，只要不在 SSO 就行）
+            # 等待页面离开 SSO，期间处理角色选择页（不要求进入 wangdian，只要不在 SSO 就行）
             for _ in range(30):
                 await page.wait_for_timeout(1000)
+                # 角色选择页通用处理（适用于任何站点的独立 SSO 页面）
+                try:
+                    from login import _select_first_role_and_enter
+                    if await _select_first_role_and_enter(page):
+                        await page.wait_for_timeout(2000)
+                        continue
+                except Exception as e:
+                    self._emit_log(f'角色选择处理异常: {e}', 'login')
                 if not is_auth_url(page.url):
                     break
         finally:
@@ -545,7 +569,22 @@ class BackgroundWorker(threading.Thread):
             self._emit_log(f'常驻页面导航完成，当前 URL: {page.url}', log_category)
 
             if is_auth_url(page.url):
-                if 'market-cod.sto.cn' in url:
+                if 'page.sto.cn' in url:
+                    # page.sto.cn 有独立 session，SSO 登录后会自动跳转回目标页
+                    self._emit_log(f'page.sto.cn 需要独立登录，执行登录流程', 'login')
+                    try:
+                        await self._do_sso_login_on_page(page)
+                        await page.wait_for_timeout(2000)
+                        # 若登录后未回到实操中心，重新导航
+                        if url not in page.url:
+                            await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+                            await page.wait_for_timeout(2000)
+                        self._emit_log(f'page.sto.cn 登录完成，当前 URL: {page.url}', 'login')
+                    except Exception as e:
+                        self._emit_log(f'page.sto.cn 登录失败: {e}，跳过此页面', 'login')
+                        await page.close()
+                        return False
+                elif 'market-cod.sto.cn' in url:
                     # market-cod 有独立 session，当前页面已经在 SSO 页
                     self._emit_log(f'market-cod 需要独立登录，执行登录流程', 'login')
                     try:
@@ -634,9 +673,9 @@ class BackgroundWorker(threading.Thread):
                     raise Exception(f'Page navigated to error: {page.url}')
 
                 if is_auth_url(page.url):
-                    # market-cod 有独立 session，跳转到 SSO 不代表全局过期
+                    # market-cod / page.sto.cn 有独立 session，跳转到 SSO 不代表全局过期
                     # 对这些页面单独走登录流程（当前页面已在 SSO，用 skip_navigate）
-                    if 'market-cod.sto.cn' in url:
+                    if 'market-cod.sto.cn' in url or 'page.sto.cn' in url:
                         self._emit_log(f'独立 session 页面需要重新登录: {url}', 'heartbeat')
                         try:
                             await self._do_sso_login_on_page(page)

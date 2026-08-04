@@ -166,8 +166,10 @@ async def _do_dingtalk_login_flow(page: Page) -> None:
         await _finish_confirm_task(confirm_task)
 
 
-async def select_first_role_if_present(page: Page) -> bool:
-    """如果出现多角色选择页，选择第一个角色并点击进入系统。"""
+async def _select_first_role_and_enter(page: Page) -> bool:
+    """检测角色选择页，点击「进入系统」（默认选中第一个）。
+    返回 True 表示检测到角色页并已点击；无角色页返回 False。
+    注意：不等待特定 URL，由调用方决定后续等待逻辑（适用于 wangdian 及其他页面）。"""
     role_page = page.locator(ROLE_PAGE_SELECTOR)
     role_items = page.locator(ROLE_ITEM_SELECTOR)
 
@@ -193,10 +195,6 @@ async def select_first_role_if_present(page: Page) -> bool:
         if await entry_button.first.is_visible(timeout=3000):
             await entry_button.first.click()
             logger.info('已点击「进入系统」')
-            await page.wait_for_url(
-                lambda url: is_logged_in_url(url),
-                timeout=30000,
-            )
             return True
     except Exception:
         pass
@@ -214,6 +212,14 @@ async def select_first_role_if_present(page: Page) -> bool:
 
     await entry_button.first.click()
     logger.info('已点击「进入系统」')
+    return True
+
+
+async def select_first_role_if_present(page: Page) -> bool:
+    """如果出现多角色选择页，选择第一个角色并点击进入系统（等待进入 wangdian）。"""
+    handled = await _select_first_role_and_enter(page)
+    if not handled:
+        return False
     await page.wait_for_url(
         lambda url: is_logged_in_url(url),
         timeout=30000,
