@@ -72,7 +72,7 @@ SSO_URL = LOGIN_ENTRY_URL
 WANGDIAN_INDEX_URL = 'https://wangdian.sto.cn/index'
 
 ROLE_PAGE_SELECTOR = '.accountCorrelation_main_window'
-ROLE_ITEM_SELECTOR = '.next-list-item.list_wrap_item'
+ROLE_ITEM_SELECTOR = '.next-list-item[class*="list_wrap_item"]'
 ROLE_ENTRY_BUTTON_SELECTOR = '.entrybtn'
 SAFETY_QUICK_LOGIN_SELECTOR = 'button.ant-btn-primary:has-text("快速登录")'
 
