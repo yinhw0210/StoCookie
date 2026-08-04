@@ -11,8 +11,6 @@ LOG_DIR = os.path.join(BASE_DIR, 'logs')
 BROWSERS_DIR = os.path.join(BASE_DIR, 'browsers')
 SETTINGS_PATH = os.path.join(BASE_DIR, 'settings.json')
 
-STORAGE_STATE_PATH = os.path.join(STORAGE_DIR, 'state.json')
-
 PERSISTENT_PAGES = [
     'https://front.sto.cn/group/customerCenter#/',
     'https://wangdian.sto.cn/page/fin-center/settlement/new-outbound-settlement',

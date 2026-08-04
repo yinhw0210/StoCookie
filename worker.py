@@ -18,7 +18,6 @@ from config import (
     SETTINGS_PATH,
     SSO_URL,
     STORAGE_DIR,
-    STORAGE_STATE_PATH,
     WANGDIAN_ANNOUNCEMENT_CLOSE_SELECTOR,
     WANGDIAN_INDEX_URL,
     WANGDIAN_MAP_AREA_DETAIL_URL_MARKER,
@@ -82,6 +81,10 @@ class BackgroundWorker(threading.Thread):
         self._known_spf_sid_values: set[str] = set()
 
         settings = _load_settings()
+        # 从持久化恢复已知 spf_sid 值（用于跨重启检测值变化）
+        saved = settings.get('known_spf_sid_values', [])
+        if saved:
+            self._known_spf_sid_values.update(saved)
         self._collect_interval = settings.get('collect_interval', COLLECT_INTERVAL_MINUTES)
         self._heartbeat_interval = settings.get('heartbeat_interval', HEARTBEAT_INTERVAL_MINUTES)
         self._countdown_from_start = settings.get('countdown_from_start', False)
@@ -120,12 +123,7 @@ class BackgroundWorker(threading.Thread):
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=False)
 
-            if os.path.exists(STORAGE_STATE_PATH):
-                self._emit_log('恢复已有 Session...', 'login')
-                context = await browser.new_context(storage_state=STORAGE_STATE_PATH)
-            else:
-                self._emit_log('无已有 Session，创建新 context', 'login')
-                context = await browser.new_context()
+            context = await browser.new_context()
 
             self._register_wangdian_trigger(context)
 
@@ -264,7 +262,6 @@ class BackgroundWorker(threading.Thread):
             page = await context.new_page()
             try:
                 await login_via_dingtalk(page)
-                await context.storage_state(path=STORAGE_STATE_PATH)
                 await self._replace_login_page(page)
                 now = datetime.now().strftime('%H:%M:%S')
                 self._emit_status({'login': f'已登录 ({now})', 'login_time': now})
@@ -599,7 +596,6 @@ class BackgroundWorker(threading.Thread):
             open_finance_fundmanage=not fm_page or fm_page.is_closed(),
             log_category='general',
         )
-        await context.storage_state(path=STORAGE_STATE_PATH)
         self._emit_log(f'常驻页面打开完成，共 {len(self._persistent_pages)} 个', 'general')
 
     async def _reload_persistent_pages(self, context) -> bool:
@@ -674,8 +670,6 @@ class BackgroundWorker(threading.Thread):
                         self._emit_log(f'常驻页面重新打开也失败: {url} -> {e2}', 'heartbeat')
 
         await self._maybe_run_wangdian_searches(context, log_category='heartbeat')
-        if not session_expired:
-            await context.storage_state(path=STORAGE_STATE_PATH)
         return not session_expired
 
     async def _reopen_finance_fundmanage(self, context):
@@ -930,6 +924,7 @@ class BackgroundWorker(threading.Thread):
                         await self._do_login(context)
                         await self._open_persistent_pages(context)
                         self._known_spf_sid_values.clear()
+                        self._persist_known_spf_sid_values()
                         await self._do_collect_and_report(context)
                         self._emit_combined_sync_status()
                     except Exception as e2:
@@ -943,6 +938,7 @@ class BackgroundWorker(threading.Thread):
                         await self._do_login(context)
                         await self._open_persistent_pages(context)
                         self._known_spf_sid_values.clear()
+                        self._persist_known_spf_sid_values()
                         await self._do_collect_and_report(context)
                         self._emit_combined_sync_status()
                     else:
@@ -950,6 +946,7 @@ class BackgroundWorker(threading.Thread):
                         if spf_value not in self._known_spf_sid_values:
                             self._emit_log(f'[spf_sid探测] ✓ 新 spf_sid (值: {spf_value[:8]}...)，存储并触发上报', 'report')
                             self._known_spf_sid_values.add(spf_value)
+                            self._persist_known_spf_sid_values()
                             await self._do_collect_and_report(context)
                             self._emit_combined_sync_status()
                         else:
@@ -962,6 +959,16 @@ class BackgroundWorker(threading.Thread):
             if probe_page and not probe_page.is_closed():
                 await probe_page.close()
             self._emit_log('[spf_sid探测] 协程退出', 'report')
+
+    def _persist_known_spf_sid_values(self):
+        """将已知 spf_sid 值写入 settings.json，用于跨重启检测值变化。"""
+        try:
+            settings = _load_settings()
+            settings['known_spf_sid_values'] = sorted(self._known_spf_sid_values)
+            with open(SETTINGS_PATH, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, ensure_ascii=False, indent=4)
+        except Exception:
+            pass
 
     async def _do_sync_cycle(self, context):
         self._emit_status({'sync': '同步中...', 'heartbeat': '检测中...'})
