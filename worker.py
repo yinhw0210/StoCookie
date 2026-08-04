@@ -257,6 +257,9 @@ class BackgroundWorker(threading.Thread):
 
     async def _do_login(self, context):
         self._emit_status({'login': '登录中...'})
+        # 清空 context 中所有 cookie，避免 _check_session 等前置操作
+        # 留下的不完整 SSO cookie 干扰登录流程导致 403 重定向循环
+        await context.clear_cookies()
         for attempt in range(3):
             self._emit_log(f'开始登录... (第{attempt+1}次)', 'login')
             page = await context.new_page()
