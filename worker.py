@@ -79,6 +79,7 @@ class BackgroundWorker(threading.Thread):
         self._persistent_pages: dict[str, object] = {}
         self._pdd = None
         self._known_spf_sid_values: set[str] = set()
+        self._wangdian_search_lock = None
 
         settings = _load_settings()
         # 从持久化恢复已知 spf_sid 值（用于跨重启检测值变化）
@@ -124,6 +125,10 @@ class BackgroundWorker(threading.Thread):
             browser = await p.chromium.launch(headless=False)
 
             context = await browser.new_context()
+
+            # wangdian 首页搜索互斥锁：常驻页面搜索与 spf_sid 探测协程
+            # 会同时操作 wangdian 首页搜索框，需串行避免冲突（Target crashed）
+            self._wangdian_search_lock = asyncio.Lock()
 
             self._register_wangdian_trigger(context)
 
@@ -260,6 +265,9 @@ class BackgroundWorker(threading.Thread):
         # 清空 context 中所有 cookie，避免 _check_session 等前置操作
         # 留下的不完整 SSO cookie 干扰登录流程导致 403 重定向循环
         await context.clear_cookies()
+        # 同时关闭所有常驻页面，否则 _open_persistent_pages 会因页面对象仍存在
+        # 而跳过重新打开，导致登录后 cookie 无法重新生成
+        await self._close_all_persistent_pages()
         for attempt in range(3):
             self._emit_log(f'开始登录... (第{attempt+1}次)', 'login')
             page = await context.new_page()
@@ -517,7 +525,17 @@ class BackgroundWorker(threading.Thread):
         self._emit_log(f'常驻页面已打开: {FINANCE_FUNDMANAGE_URL}', log_category)
 
     async def _run_wangdian_searches(self, context, page, *, open_finance_fundmanage: bool = False, log_category: str = 'general'):
-        """在 wangdian/index 依次搜索 WANGDIAN_SEARCH_KEYWORDS，触发对应 Cookie 生成"""
+        """在 wangdian/index 依次搜索 WANGDIAN_SEARCH_KEYWORDS，触发对应 Cookie 生成。
+        与 spf_sid 探测协程互斥（同一把锁），避免同时操作 wangdian 首页搜索框导致冲突。"""
+        async with self._wangdian_search_lock:
+            await self._run_wangdian_searches_locked(
+                context, page,
+                open_finance_fundmanage=open_finance_fundmanage,
+                log_category=log_category,
+            )
+
+    async def _run_wangdian_searches_locked(self, context, page, *, open_finance_fundmanage: bool = False, log_category: str = 'general'):
+        """wangdian 搜索具体实现（调用方需已持有 _wangdian_search_lock）"""
         await self._ensure_wangdian_search_ready(page, log_category)
         await self._dismiss_announcement(page, log_category)
 
@@ -628,6 +646,17 @@ class BackgroundWorker(threading.Thread):
                 continue
             self._emit_log(f'常驻页面未登记，尝试补开: {url}', log_category)
             await self._open_one_persistent_page(context, url, log_category)
+
+    async def _close_all_persistent_pages(self):
+        """关闭所有常驻页面，使 _open_persistent_pages 能重新打开（登录后 cookie 重新生成）"""
+        for url in list(self._persistent_pages.keys()):
+            page = self._persistent_pages.pop(url, None)
+            if page:
+                try:
+                    if not page.is_closed():
+                        await page.close()
+                except Exception:
+                    pass
 
     async def _open_persistent_pages(self, context):
         self._emit_log('开始打开常驻页面...', 'general')
@@ -943,6 +972,17 @@ class BackgroundWorker(threading.Thread):
         # TODO: 12h 预判已由 spf_sid 探测协程替代，待稳定后清理此方法
         await self._do_sync_cycle(context)
 
+    async def _recreate_probe_page(self, context, probe_page):
+        """关闭并重建探测页面：probe_page 长时间运行或重登后可能 crash，
+        goto 持续超时（Page.goto: Timeout），重建后恢复正常探测。"""
+        if probe_page:
+            try:
+                if not probe_page.is_closed():
+                    await probe_page.close()
+            except Exception:
+                pass
+        return await context.new_page()
+
     async def _probe_spf_sid_loop(self, context):
         """spf_sid 探测协程：独立 page，随机间隔打开订单查询页面，
         检测 spf_sid 值变化。新值存储并触发上报，cookie 缺失则重新登录。
@@ -955,40 +995,43 @@ class BackgroundWorker(threading.Thread):
             probe_page = await context.new_page()
             while not self._stop_event.is_set():
                 search_ok = False
+                # 每轮开始确保探测页面可用（可能已被重登/异常关闭或 crash）
+                if probe_page is None or probe_page.is_closed():
+                    probe_page = await context.new_page()
 
-                for attempt in range(1, MAX_RETRIES + 1):
-                    try:
-                        self._emit_log(f'[spf_sid探测] 第{attempt}次尝试...', 'report')
-                        await probe_page.goto(WANGDIAN_INDEX_URL, wait_until='domcontentloaded', timeout=15000)
-                        await probe_page.wait_for_timeout(2000)
-                        await self._dismiss_announcement(probe_page, 'spf_probe')
-                        await self._search_and_click(probe_page, '订单查询', 'spf_probe')
-                        # 等待订单查询页完全加载：前端用 SSO_TOKEN 换取 TOKEN 并种下
-                        # 同时 spf_sid 也会在此过程中产生（接口可能较慢，轮询等待）
-                        token_ready = False
-                        for _ in range(10):
-                            await probe_page.wait_for_timeout(1500)
-                            cookies = await context.cookies('https://page.sto.cn')
-                            if any(c['name'] == 'TOKEN' for c in cookies):
-                                token_ready = True
-                                break
-                        self._emit_log(
-                            f'[spf_sid探测] 订单查询页加载完成，TOKEN 就绪: {token_ready}',
-                            'report',
-                        )
-                        search_ok = True
-                        break
-                    except Exception as e:
-                        if attempt < MAX_RETRIES:
-                            self._emit_log(f'[spf_sid探测] 搜索失败({attempt}/{MAX_RETRIES}): {e}，重试...', 'report')
-                        else:
-                            self._emit_log(f'[spf_sid探测] 搜索全部失败({MAX_RETRIES}/{MAX_RETRIES}): {e}', 'report')
+                # 与主循环 wangdian 搜索互斥（同一把锁），避免同时操作首页搜索框
+                async with self._wangdian_search_lock:
+                    for attempt in range(1, MAX_RETRIES + 1):
+                        try:
+                            self._emit_log(f'[spf_sid探测] 第{attempt}次尝试...', 'report')
+                            await probe_page.goto(WANGDIAN_INDEX_URL, wait_until='domcontentloaded', timeout=15000)
+                            await probe_page.wait_for_timeout(2000)
+                            await self._dismiss_announcement(probe_page, 'spf_probe')
+                            await self._search_and_click(probe_page, '订单查询', 'spf_probe')
+                            # 等待订单查询页加载完成（页面异步加载，接口响应后种下相关 cookie）
+                            try:
+                                await probe_page.wait_for_load_state('networkidle', timeout=30000)
+                                self._emit_log('[spf_sid探测] 订单查询页加载完成 (networkidle)', 'report')
+                            except Exception:
+                                # networkidle 超时（页面可能持续轮询），兜底等待
+                                await probe_page.wait_for_timeout(5000)
+                                self._emit_log('[spf_sid探测] networkidle 超时，按固定等待处理', 'report')
+                            search_ok = True
+                            break
+                        except Exception as e:
+                            if attempt < MAX_RETRIES:
+                                self._emit_log(f'[spf_sid探测] 搜索失败({attempt}/{MAX_RETRIES}): {e}，重建探测页面重试...', 'report')
+                                probe_page = await self._recreate_probe_page(context, probe_page)
+                            else:
+                                self._emit_log(f'[spf_sid探测] 搜索全部失败({MAX_RETRIES}/{MAX_RETRIES}): {e}', 'report')
 
                 if not search_ok:
                     self._emit_log(f'[spf_sid探测] 订单查询不可用，触发重新登录', 'report')
                     try:
                         await self._do_login(context)
                         await self._open_persistent_pages(context)
+                        # 重登清空了 cookie，probe_page 状态可能已失效，重建
+                        probe_page = await self._recreate_probe_page(context, probe_page)
                         self._known_spf_sid_values.clear()
                         self._persist_known_spf_sid_values()
                         await self._do_collect_and_report(context)
@@ -1003,6 +1046,8 @@ class BackgroundWorker(threading.Thread):
                         self._emit_log('[spf_sid探测] ✗ spf_sid 仍缺失，触发重新登录', 'report')
                         await self._do_login(context)
                         await self._open_persistent_pages(context)
+                        # 重登清空了 cookie，probe_page 状态可能已失效，重建
+                        probe_page = await self._recreate_probe_page(context, probe_page)
                         self._known_spf_sid_values.clear()
                         self._persist_known_spf_sid_values()
                         await self._do_collect_and_report(context)
