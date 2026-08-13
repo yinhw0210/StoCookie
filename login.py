@@ -23,8 +23,9 @@ async def _has_dingtalk_frame(page: Page) -> bool:
     )
 
 
-async def _get_dingtalk_frame(page: Page, retries: int = 3) -> Frame:
-    """定位钉钉 OAuth2 iframe"""
+async def _get_dingtalk_frame(page: Page, retries: int = 6) -> Frame:
+    """定位钉钉 OAuth2 iframe。登录页加载较慢（app_login 页可能需 10s+ 才渲染出 iframe），
+    重试 6 次 × 2s ≈ 12s，避免加载慢被误判为「未找到钉钉登录 iframe」。"""
     for i in range(retries):
         dd_frame = next(
             (f for f in page.frames if 'login.dingtalk.com/oauth2/challenge' in f.url),

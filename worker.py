@@ -80,6 +80,7 @@ class BackgroundWorker(threading.Thread):
         self._pdd = None
         self._known_spf_sid_values: set[str] = set()
         self._wangdian_search_lock = None
+        self._login_lock = None
 
         settings = _load_settings()
         # 从持久化恢复已知 spf_sid 值（用于跨重启检测值变化）
@@ -129,6 +130,9 @@ class BackgroundWorker(threading.Thread):
             # wangdian 首页搜索互斥锁：常驻页面搜索与 spf_sid 探测协程
             # 会同时操作 wangdian 首页搜索框，需串行避免冲突（Target crashed）
             self._wangdian_search_lock = asyncio.Lock()
+            # 登录互斥锁：主循环（同步/心跳）与探测协程都可能触发重新登录，
+            # 两个 _do_login 并发会互相 clear_cookies，导致登录全部失败
+            self._login_lock = asyncio.Lock()
 
             self._register_wangdian_trigger(context)
 
@@ -261,6 +265,13 @@ class BackgroundWorker(threading.Thread):
             await page.close()
 
     async def _do_login(self, context):
+        """重新登录（带互斥锁）：主循环与探测协程可能并发触发登录，
+        两个 _do_login 并发会互相 clear_cookies 导致登录全部失败，
+        因此用锁保证任意时刻只有一个登录流程在执行。"""
+        async with self._login_lock:
+            return await self._do_login_locked(context)
+
+    async def _do_login_locked(self, context):
         self._emit_status({'login': '登录中...'})
         # 清空 context 中所有 cookie，避免 _check_session 等前置操作
         # 留下的不完整 SSO cookie 干扰登录流程导致 403 重定向循环
@@ -1027,31 +1038,43 @@ class BackgroundWorker(threading.Thread):
 
                 if not search_ok:
                     self._emit_log(f'[spf_sid探测] 订单查询不可用，触发重新登录', 'report')
-                    try:
-                        await self._do_login(context)
-                        await self._open_persistent_pages(context)
-                        # 重登清空了 cookie，probe_page 状态可能已失效，重建
-                        probe_page = await self._recreate_probe_page(context, probe_page)
-                        self._known_spf_sid_values.clear()
-                        self._persist_known_spf_sid_values()
-                        await self._do_collect_and_report(context)
-                        self._emit_combined_sync_status()
-                    except Exception as e2:
-                        self._emit_log(f'[spf_sid探测] 重新登录也失败: {e2}', 'report')
+                    if self._login_lock and self._login_lock.locked():
+                        self._emit_log('[spf_sid探测] 已有登录在进行，跳过本轮（下轮再检测）', 'report')
+                    else:
+                        try:
+                            login_ok = await self._do_login(context)
+                            if login_ok:
+                                await self._open_persistent_pages(context)
+                                # 重登清空了 cookie，probe_page 状态可能已失效，重建
+                                probe_page = await self._recreate_probe_page(context, probe_page)
+                                self._known_spf_sid_values.clear()
+                                self._persist_known_spf_sid_values()
+                                await self._do_collect_and_report(context)
+                                self._emit_combined_sync_status()
+                            else:
+                                self._emit_log('[spf_sid探测] 登录失败，跳过本轮（下轮再检测）', 'report')
+                        except Exception as e2:
+                            self._emit_log(f'[spf_sid探测] 重新登录也失败: {e2}', 'report')
                 else:
                     cookies = await context.cookies()
                     spf = next((c for c in cookies if c['name'] == 'spf_sid'), None)
 
                     if not spf:
                         self._emit_log('[spf_sid探测] ✗ spf_sid 仍缺失，触发重新登录', 'report')
-                        await self._do_login(context)
-                        await self._open_persistent_pages(context)
-                        # 重登清空了 cookie，probe_page 状态可能已失效，重建
-                        probe_page = await self._recreate_probe_page(context, probe_page)
-                        self._known_spf_sid_values.clear()
-                        self._persist_known_spf_sid_values()
-                        await self._do_collect_and_report(context)
-                        self._emit_combined_sync_status()
+                        if self._login_lock and self._login_lock.locked():
+                            self._emit_log('[spf_sid探测] 已有登录在进行，跳过本轮（下轮再检测）', 'report')
+                        else:
+                            login_ok = await self._do_login(context)
+                            if login_ok:
+                                await self._open_persistent_pages(context)
+                                # 重登清空了 cookie，probe_page 状态可能已失效，重建
+                                probe_page = await self._recreate_probe_page(context, probe_page)
+                                self._known_spf_sid_values.clear()
+                                self._persist_known_spf_sid_values()
+                                await self._do_collect_and_report(context)
+                                self._emit_combined_sync_status()
+                            else:
+                                self._emit_log('[spf_sid探测] 登录失败，跳过本轮（下轮再检测）', 'report')
                     else:
                         spf_value = spf['value']
                         if spf_value not in self._known_spf_sid_values:
