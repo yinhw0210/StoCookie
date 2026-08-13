@@ -38,6 +38,7 @@ COOKIE_REPORT_LABELS = {
     'SESSION=': 'SESSION (finance-mng)',
     'cod=': 'cod (market-cod)',
     'finance=': 'finance (finance-fundmanage)',
+    'finance_report_session=': 'finance_report_session (finance-report)',
     'spf_sid=': 'spf_sid (wutonggateway)',
     'stoToken=': 'stoToken (wutonggateway)',
     'sid_cfo=': 'sid_cfo (wutonggateway)',

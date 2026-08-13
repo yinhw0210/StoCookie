@@ -35,6 +35,8 @@ COOKIE_RULES = [
     ('finance-mng.sto.cn', 'SESSION', lambda n, v: f'{n}={v}'),
     ('market-cod.sto.cn', 'cod', lambda n, v: f'{n}={v}'),
     ('finance-fundmanage.sto.cn', 'SESSION', lambda n, v: f'finance={v}'),
+    # 与上面同为 SESSION，但来自 finance-report.sto.cn，上报 key 用 finance_report_session
+    ('finance-report.sto.cn', 'SESSION', lambda n, v: f'finance_report_session={v}'),
     ('.sto.cn', 'spf_sid', lambda n, v: f'{n}={v}'),
     ('.sto.cn', 'stoToken', lambda n, v: f'{n}={v}'),
     ('.sto.cn', 'sid_cfo', lambda n, v: f'{n}={v}'),
