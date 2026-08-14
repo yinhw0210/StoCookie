@@ -25,7 +25,7 @@ EXPECTED_REPORT_ITEMS = [
     {'label': 'SESSION (finance-mng)', 'rule_domain': 'finance-mng.sto.cn', 'rule_name': 'SESSION'},
     {'label': 'cod (market-cod)', 'rule_domain': 'market-cod.sto.cn', 'rule_name': 'cod'},
     {'label': 'finance (finance-fundmanage)', 'rule_domain': 'finance-fundmanage.sto.cn', 'rule_name': 'SESSION'},
-    {'label': 'finance_report_session (finance-report)', 'rule_domain': 'finance-report.sto.cn', 'rule_name': 'SESSION'},
+    {'label': 'fin_report_session (finance-report)', 'rule_domain': 'finance-report.sto.cn', 'rule_name': 'SESSION'},
     {'label': 'spf_sid (wutonggateway)', 'rule_domain': 'wutonggateway.sto.cn', 'rule_name': 'spf_sid'},
     {'label': 'stoToken (wutonggateway)', 'rule_domain': 'wutonggateway.sto.cn', 'rule_name': 'stoToken'},
     {'label': 'sid_cfo (wutonggateway)', 'rule_domain': 'wutonggateway.sto.cn', 'rule_name': 'sid_cfo'},
