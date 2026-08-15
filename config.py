@@ -107,3 +107,12 @@ PDD_TARGET_URL = 'https://56-partner.pinduoduo.com/delivery-workbench/order'
 PDD_COOKIE_DOMAIN = '56-partner-api.pinduoduo.com'
 PDD_COOKIE_NAME = 'SUB_PASS_ID'
 PDD_STORAGE_PATH = os.path.join(STORAGE_DIR, 'pdd_state.json')
+
+# 客户经营分析 engineSid 配置
+# engineSid 在 zc.sto.cn 的 sessionStorage 中，每次页面刷新都会变成全新值；
+# 通过网点搜索【客户经营分析】打开页面（路径同【网点账单】），独立时间线定时刷新并上报。
+ZC_SEARCH_KEYWORD = '客户经营分析'
+ZC_ORIGIN = 'zc.sto.cn'                    # 用于在 frames 中定位 zc.sto.cn 页面/子框架
+ZC_SESSION_STORAGE_KEY = 'engineSid'       # sessionStorage 中的 key（驼峰）
+ZC_REPORT_KEY = 'enginesid'                # 上报到后端的 key（小写，对应 CookieKeyEnum.ENGINESID.code）
+ZC_ENGINE_SID_INTERVAL_MINUTES = 30        # 默认刷新/上报间隔（分钟），可在 GUI 设置中修改

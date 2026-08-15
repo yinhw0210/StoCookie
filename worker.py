@@ -27,6 +27,11 @@ from config import (
     WANGDIAN_SEARCH_INPUT_SELECTOR,
     WANGDIAN_SEARCH_KEYWORDS,
     WANGDIAN_TRIGGER_INTERVAL_SECONDS,
+    ZC_ENGINE_SID_INTERVAL_MINUTES,
+    ZC_ORIGIN,
+    ZC_REPORT_KEY,
+    ZC_SEARCH_KEYWORD,
+    ZC_SESSION_STORAGE_KEY,
     is_auth_url,
     is_logged_in_url,
 )
@@ -48,6 +53,8 @@ COOKIE_REPORT_LABELS = {
     'WD_STO=': 'WD_STO 组合',
     'TOKEN=': 'TOKEN (page.sto.cn)',
 }
+
+ZC_STATUS_LABEL = 'engineSid (客户经营分析)'
 
 
 def _load_settings() -> dict:
@@ -82,6 +89,7 @@ class BackgroundWorker(threading.Thread):
         self._known_spf_sid_values: set[str] = set()
         self._wangdian_search_lock = None
         self._login_lock = None
+        self._zc_page = None
 
         settings = _load_settings()
         # 从持久化恢复已知 spf_sid 值（用于跨重启检测值变化）
@@ -93,6 +101,8 @@ class BackgroundWorker(threading.Thread):
         self._countdown_from_start = settings.get('countdown_from_start', False)
         self._proactive_refresh_rules = settings.get('proactive_refresh', [])
         self._cookie_obtained_at: dict[str, tuple[str, float]] = {}
+        self._zc_enabled = settings.get('zc_enabled', True)
+        self._zc_interval = settings.get('zc_interval', ZC_ENGINE_SID_INTERVAL_MINUTES)
 
     @property
     def collect_interval(self):
@@ -101,6 +111,14 @@ class BackgroundWorker(threading.Thread):
     @property
     def heartbeat_interval(self):
         return self._heartbeat_interval
+
+    @property
+    def zc_interval(self):
+        return self._zc_interval
+
+    @property
+    def zc_enabled(self):
+        return self._zc_enabled
 
     def run(self):
         os.makedirs(STORAGE_DIR, exist_ok=True)
@@ -155,6 +173,9 @@ class BackgroundWorker(threading.Thread):
 
             # 启动 spf_sid 探测协程（独立 page，随机间隔 30s/1min/3min）
             asyncio.create_task(self._probe_spf_sid_loop(context))
+
+            # 启动 engineSid 探测协程（独立 page + 独立时间线，默认每 30 分钟刷新上报）
+            asyncio.create_task(self._probe_engine_sid_loop(context))
 
             while not self._stop_event.is_set():
                 if self._paused:
@@ -1166,6 +1187,175 @@ class BackgroundWorker(threading.Thread):
                 return label
         return cookie_prefix[:30]
 
+    # ========== engineSid（客户经营分析）独立时间线 ==========
+
+    async def _open_zc_page_via_search(self, context) -> bool:
+        """通过网点搜索【客户经营分析】打开 zc 页面并捕获它弹出的新标签页。
+        路径与【网点账单】一致，需持 _wangdian_search_lock 避免和其它搜索抢首页搜索框。"""
+        wangdian_page = self._persistent_pages.get(WANGDIAN_INDEX_URL)
+        if not wangdian_page or wangdian_page.is_closed() or is_auth_url(wangdian_page.url):
+            self._emit_log('[engineSid] wangdian 首页不可用，暂时无法搜索客户经营分析', 'zc')
+            return False
+
+        async with self._wangdian_search_lock:
+            try:
+                await self._ensure_wangdian_search_ready(wangdian_page, 'zc')
+                await self._dismiss_announcement(wangdian_page, 'zc')
+
+                # 关闭旧的 zc 页面，避免标签页泄漏
+                if self._zc_page and not self._zc_page.is_closed():
+                    try:
+                        await self._zc_page.close()
+                    except Exception:
+                        pass
+                self._zc_page = None
+
+                existing = set(context.pages)
+                new_page = None
+                try:
+                    async with context.expect_page(timeout=20000) as new_page_info:
+                        await self._search_and_click(wangdian_page, ZC_SEARCH_KEYWORD, 'zc')
+                    new_page = await new_page_info.value
+                except Exception:
+                    # 兜底：搜索点击后从新出现的标签页里找
+                    for p in context.pages:
+                        if p not in existing:
+                            new_page = p
+                            break
+
+                if not new_page:
+                    self._emit_log('[engineSid] 搜索客户经营分析后未捕获到新标签页', 'zc')
+                    return False
+
+                try:
+                    await new_page.wait_for_load_state('domcontentloaded', timeout=20000)
+                except Exception:
+                    pass
+                self._zc_page = new_page
+                self._emit_log(f'[engineSid] 已打开客户经营分析页: {new_page.url}', 'zc')
+                return True
+            except Exception as e:
+                self._emit_log(f'[engineSid] 打开客户经营分析页失败: {e}', 'zc')
+                return False
+
+    async def _read_engine_sid(self, page) -> str:
+        """在 origin 为 zc.sto.cn 的 frame 里读取 sessionStorage.engineSid。"""
+        js = (
+            "() => { try { return sessionStorage.getItem('%s') || ''; } "
+            "catch (e) { return ''; } }" % ZC_SESSION_STORAGE_KEY
+        )
+        for frame in page.frames:
+            if ZC_ORIGIN in frame.url:
+                try:
+                    value = await frame.evaluate(js)
+                    if value:
+                        return value
+                except Exception:
+                    pass
+        # 兜底：主 frame（页面本身就是 zc.sto.cn 时也会被上面的 frames 命中，这里再保险一次）
+        try:
+            value = await page.evaluate(js)
+            if value:
+                return value
+        except Exception:
+            pass
+        return ''
+
+    async def _read_engine_sid_with_wait(self, page, attempts: int = 15) -> str:
+        """页面异步加载，engineSid 可能稍后才写入 sessionStorage，轮询等待。"""
+        for _ in range(attempts):
+            value = await self._read_engine_sid(page)
+            if value:
+                return value
+            await page.wait_for_timeout(1000)
+        return ''
+
+    async def _refresh_and_report_engine_sid(self, context):
+        """刷新客户经营分析页拿到全新的 engineSid 并上报（engineSid 每次刷新都变，不去重）。"""
+        now_str = datetime.now().strftime('%H:%M:%S')
+
+        if not self._zc_page or self._zc_page.is_closed():
+            if not await self._open_zc_page_via_search(context):
+                self._emit_status({'zc_status': {ZC_STATUS_LABEL: {'ok': False, 'error': '页面未打开', 'time': now_str}}})
+                return
+
+        page = self._zc_page
+        try:
+            await page.reload(wait_until='domcontentloaded', timeout=25000)
+        except Exception as e:
+            self._emit_log(f'[engineSid] 刷新页面失败: {e}，尝试重新开页', 'zc')
+            if not await self._open_zc_page_via_search(context):
+                self._emit_status({'zc_status': {ZC_STATUS_LABEL: {'ok': False, 'error': '刷新/开页失败', 'time': now_str}}})
+                return
+            page = self._zc_page
+
+        try:
+            await page.wait_for_load_state('networkidle', timeout=30000)
+        except Exception:
+            await page.wait_for_timeout(5000)
+
+        value = await self._read_engine_sid_with_wait(page)
+        if not value:
+            # reload 可能掉回 SSO/登录页，重新搜索开页兜底
+            self._emit_log('[engineSid] 刷新后未取到 engineSid，重新搜索开页兜底', 'zc')
+            if await self._open_zc_page_via_search(context):
+                page = self._zc_page
+                try:
+                    await page.wait_for_load_state('networkidle', timeout=30000)
+                except Exception:
+                    await page.wait_for_timeout(5000)
+                value = await self._read_engine_sid_with_wait(page)
+
+        if not value:
+            self._emit_log('[engineSid] ✗ 未取到 engineSid', 'zc')
+            self._emit_status({'zc_status': {ZC_STATUS_LABEL: {'ok': False, 'error': '未采集到', 'time': now_str}}})
+            return
+
+        self._emit_log(f'[engineSid] ✓ 取到 engineSid (值: {value[:8]}...)，开始上报', 'zc')
+        payload = f'{ZC_REPORT_KEY}={value}'
+        account_name = await self._get_account_name()
+        extra_params = {'isScript': '1', 'accountName': account_name}
+        reports = await report_cookies([payload], emit_log=self._emit_log, log_category='zc', extra_params=extra_params)
+
+        now_str = datetime.now().strftime('%H:%M:%S')
+        for entry in reports:
+            info = self._build_report_status_info(entry['results'], now_str)
+            if info['ok']:
+                self._emit_log('[engineSid] ✓ 上报成功', 'zc')
+            elif info.get('partial'):
+                self._emit_log(f'[engineSid] ⚠ 部分上报成功 → {info.get("error", "")}', 'zc')
+            else:
+                self._emit_log(f'[engineSid] ✗ 上报失败 → {info.get("error", "")}', 'zc')
+            self._emit_status({'zc_status': {ZC_STATUS_LABEL: info}})
+
+    async def _probe_engine_sid_loop(self, context):
+        """engineSid 独立时间线：默认每 30 分钟刷新客户经营分析页并上报，间隔可在 GUI 实时修改。"""
+        self._emit_log('[engineSid] 协程启动', 'zc')
+        # 启动后稍等，等常驻页/登录就绪
+        await asyncio.sleep(10)
+        while not self._stop_event.is_set():
+            if not self._zc_enabled:
+                await asyncio.sleep(10)
+                continue
+            try:
+                await self._refresh_and_report_engine_sid(context)
+            except Exception as e:
+                self._emit_log(f'[engineSid] 周期异常: {e}', 'zc')
+
+            target = max(1, self._zc_interval) * 60
+            self._emit_log(f'[engineSid] 下一轮刷新在 {target}s 后', 'zc')
+            waited = 0
+            while waited < target and not self._stop_event.is_set() and self._zc_enabled:
+                await asyncio.sleep(5)
+                waited += 5
+                target = max(1, self._zc_interval) * 60
+        if self._zc_page and not self._zc_page.is_closed():
+            try:
+                await self._zc_page.close()
+            except Exception:
+                pass
+        self._emit_log('[engineSid] 协程退出', 'zc')
+
     # ========== PDD 站点方法 ==========
 
     async def _init_pdd(self, browser):
@@ -1264,6 +1454,11 @@ class BackgroundWorker(threading.Thread):
         self._collect_interval = collect_min
         self._heartbeat_interval = heartbeat_min
         self._emit_log(f'间隔已更新: 采集={collect_min}分钟, 心跳={heartbeat_min}分钟', 'general')
+
+    def update_zc_settings(self, enabled: bool, interval_min: int):
+        self._zc_enabled = enabled
+        self._zc_interval = interval_min
+        self._emit_log(f'engineSid 设置已更新: 启用={enabled}, 刷新间隔={interval_min}分钟', 'general')
 
     def stop(self):
         self._stop_event.set()

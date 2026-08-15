@@ -77,7 +77,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self._worker = worker
         self.setWindowTitle('设置')
-        self.setFixedSize(480, 560)
+        self.setFixedSize(480, 640)
         self.setStyleSheet(DARK_THEME)
         self._proactive_rows: list[_ProactiveRuleRow] = []
         self._build_ui(current_collect, current_heartbeat)
@@ -169,6 +169,31 @@ class SettingsDialog(QDialog):
         # 分隔线
         self._add_separator(layout)
 
+        # 客户经营分析 engineSid 配置
+        zc_label = QLabel('客户经营分析 (engineSid)')
+        zc_label.setStyleSheet('color: #60a5fa; font-size: 13px; font-weight: 600;')
+        layout.addWidget(zc_label)
+
+        self._chk_zc_enabled = QCheckBox('启用 engineSid 采集')
+        self._chk_zc_enabled.setChecked(settings.get('zc_enabled', True))
+        layout.addWidget(self._chk_zc_enabled)
+
+        zc_form = QFormLayout()
+        zc_form.setSpacing(8)
+        self._spin_zc_interval = QSpinBox()
+        self._spin_zc_interval.setRange(1, 1440)
+        self._spin_zc_interval.setValue(settings.get('zc_interval', 30))
+        self._spin_zc_interval.setSuffix(' 分钟')
+        zc_form.addRow('engineSid 刷新间隔:', self._spin_zc_interval)
+        layout.addLayout(zc_form)
+
+        zc_hint = QLabel('每次刷新页面 engineSid 都会变；独立时间线，间隔修改后即时生效')
+        zc_hint.setStyleSheet('color: #64748b; font-size: 11px;')
+        layout.addWidget(zc_hint)
+
+        # 分隔线
+        self._add_separator(layout)
+
         # 导出日志
         export_layout = QHBoxLayout()
         btn_export = QPushButton('导出日志')
@@ -237,11 +262,14 @@ class SettingsDialog(QDialog):
         settings['pdd_enabled'] = self._chk_pdd_enabled.isChecked()
         settings['pdd_account'] = self._edit_pdd_account.text().strip()
         settings['pdd_password'] = self._edit_pdd_password.text()
+        settings['zc_enabled'] = self._chk_zc_enabled.isChecked()
+        settings['zc_interval'] = self._spin_zc_interval.value()
 
         with open(SETTINGS_PATH, 'w') as f:
             json.dump(settings, f, ensure_ascii=False, indent=4)
 
         self._worker.update_intervals(collect, heartbeat)
+        self._worker.update_zc_settings(settings['zc_enabled'], settings['zc_interval'])
         self.accept()
 
     def _export_logs(self):

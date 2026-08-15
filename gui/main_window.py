@@ -158,7 +158,7 @@ class MainWindow(QMainWindow):
         log_font = QFont('JetBrains Mono', 11)
         log_font.setStyleHint(QFont.Monospace)
 
-        for tab_name in ('全部', '登录', '上报', '心跳', 'PDD', '错误'):
+        for tab_name in ('全部', '登录', '上报', '心跳', 'PDD', 'ZC', '错误'):
             text_edit = QTextEdit()
             text_edit.setReadOnly(True)
             text_edit.setFont(log_font)
@@ -208,7 +208,7 @@ class MainWindow(QMainWindow):
         self._log_views['全部'].append(msg)
         self._auto_scroll(self._log_views['全部'])
 
-        tab_map = {'login': '登录', 'report': '上报', 'heartbeat': '心跳', 'pdd': 'PDD'}
+        tab_map = {'login': '登录', 'report': '上报', 'heartbeat': '心跳', 'pdd': 'PDD', 'zc': 'ZC'}
         if category in tab_map:
             view = self._log_views[tab_map[category]]
             view.append(msg)
@@ -290,6 +290,16 @@ class MainWindow(QMainWindow):
                 ok = info.get('ok', False)
                 partial = info.get('partial', False)
                 item.update_status(f'PDD: {label}', ok=ok, partial=partial, error=error, time_str=time_str)
+
+        if 'zc_status' in data:
+            zc_status = data['zc_status']
+            for label, info in zc_status.items():
+                item = self._ensure_report_item(label)
+                time_str = info.get('time', '')
+                error = info.get('error', '')
+                ok = info.get('ok', False)
+                partial = info.get('partial', False)
+                item.update_status(label, ok=ok, partial=partial, error=error, time_str=time_str)
 
     def closeEvent(self, event):
         event.ignore()

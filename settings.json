@@ -5,6 +5,8 @@
     "pdd_enabled": true,
     "pdd_account": "17753992017",
     "pdd_password": "sto9600999*",
+    "zc_enabled": true,
+    "zc_interval": 30,
     "_proactive_refresh_disabled": "TODO: restore after spf_sid probe coroutine is stable",
     "proactive_refresh": [],
     "known_spf_sid_values": [
