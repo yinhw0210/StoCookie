@@ -1189,122 +1189,71 @@ class BackgroundWorker(threading.Thread):
 
     # ========== engineSid（客户经营分析）独立时间线 ==========
 
-    async def _open_zc_page_via_search(self, context) -> bool:
-        """通过网点搜索【客户经营分析】打开 zc 页面并捕获它弹出的新标签页。
-        路径与【网点账单】一致，需持 _wangdian_search_lock 避免和其它搜索抢首页搜索框。"""
-        wangdian_page = self._persistent_pages.get(WANGDIAN_INDEX_URL)
-        if not wangdian_page or wangdian_page.is_closed() or is_auth_url(wangdian_page.url):
-            self._emit_log('[engineSid] wangdian 首页不可用，暂时无法搜索客户经营分析', 'zc')
-            return False
-
-        async with self._wangdian_search_lock:
-            try:
-                await self._ensure_wangdian_search_ready(wangdian_page, 'zc')
-                await self._dismiss_announcement(wangdian_page, 'zc')
-
-                # 关闭旧的 zc 页面，避免标签页泄漏
-                if self._zc_page and not self._zc_page.is_closed():
-                    try:
-                        await self._zc_page.close()
-                    except Exception:
-                        pass
-                self._zc_page = None
-
-                existing = set(context.pages)
-                new_page = None
-                try:
-                    async with context.expect_page(timeout=20000) as new_page_info:
-                        await self._search_and_click(wangdian_page, ZC_SEARCH_KEYWORD, 'zc')
-                    new_page = await new_page_info.value
-                except Exception:
-                    # 兜底：搜索点击后从新出现的标签页里找
-                    for p in context.pages:
-                        if p not in existing:
-                            new_page = p
-                            break
-
-                if not new_page:
-                    self._emit_log('[engineSid] 搜索客户经营分析后未捕获到新标签页', 'zc')
-                    return False
-
-                try:
-                    await new_page.wait_for_load_state('domcontentloaded', timeout=20000)
-                except Exception:
-                    pass
-                self._zc_page = new_page
-                self._emit_log(f'[engineSid] 已打开客户经营分析页: {new_page.url}', 'zc')
-                return True
-            except Exception as e:
-                self._emit_log(f'[engineSid] 打开客户经营分析页失败: {e}', 'zc')
-                return False
-
-    async def _read_engine_sid(self, page) -> str:
-        """在 origin 为 zc.sto.cn 的 frame 里读取 sessionStorage.engineSid。"""
+    async def _read_engine_sid(self, context) -> str:
+        """遍历 context 内所有页面/子框架，在 origin 为 zc.sto.cn 处读 sessionStorage.engineSid。
+        【客户经营分析】是在 wangdian 页面内以 iframe 方式打开的（不新开标签），
+        engineSid 存在该 zc.sto.cn iframe 的 sessionStorage 里，故需遍历 frames。"""
         js = (
             "() => { try { return sessionStorage.getItem('%s') || ''; } "
             "catch (e) { return ''; } }" % ZC_SESSION_STORAGE_KEY
         )
-        for frame in page.frames:
-            if ZC_ORIGIN in frame.url:
-                try:
-                    value = await frame.evaluate(js)
-                    if value:
-                        return value
-                except Exception:
-                    pass
-        # 兜底：主 frame（页面本身就是 zc.sto.cn 时也会被上面的 frames 命中，这里再保险一次）
-        try:
-            value = await page.evaluate(js)
-            if value:
-                return value
-        except Exception:
-            pass
+        for page in context.pages:
+            if page.is_closed():
+                continue
+            for frame in page.frames:
+                if ZC_ORIGIN in frame.url:
+                    try:
+                        value = await frame.evaluate(js)
+                        if value:
+                            return value
+                    except Exception:
+                        pass
         return ''
 
-    async def _read_engine_sid_with_wait(self, page, attempts: int = 15) -> str:
-        """页面异步加载，engineSid 可能稍后才写入 sessionStorage，轮询等待。"""
+    async def _read_engine_sid_with_wait(self, context, attempts: int = 20) -> str:
+        """zc iframe 异步加载，engineSid 可能稍后才写入 sessionStorage，轮询等待。"""
         for _ in range(attempts):
-            value = await self._read_engine_sid(page)
+            value = await self._read_engine_sid(context)
             if value:
                 return value
-            await page.wait_for_timeout(1000)
+            await asyncio.sleep(1)
         return ''
 
     async def _refresh_and_report_engine_sid(self, context):
-        """刷新客户经营分析页拿到全新的 engineSid 并上报（engineSid 每次刷新都变，不去重）。"""
+        """独立探测页 goto wangdian/index → 搜索【客户经营分析】（同页 iframe 打开）→
+        读取全新的 engineSid 并上报。engineSid 每次加载都变，不去重。"""
         now_str = datetime.now().strftime('%H:%M:%S')
+        MAX_RETRIES = 3
 
-        if not self._zc_page or self._zc_page.is_closed():
-            if not await self._open_zc_page_via_search(context):
-                self._emit_status({'zc_status': {ZC_STATUS_LABEL: {'ok': False, 'error': '页面未打开', 'time': now_str}}})
-                return
+        if self._zc_page is None or self._zc_page.is_closed():
+            self._zc_page = await context.new_page()
 
-        page = self._zc_page
-        try:
-            await page.reload(wait_until='domcontentloaded', timeout=25000)
-        except Exception as e:
-            self._emit_log(f'[engineSid] 刷新页面失败: {e}，尝试重新开页', 'zc')
-            if not await self._open_zc_page_via_search(context):
-                self._emit_status({'zc_status': {ZC_STATUS_LABEL: {'ok': False, 'error': '刷新/开页失败', 'time': now_str}}})
-                return
-            page = self._zc_page
-
-        try:
-            await page.wait_for_load_state('networkidle', timeout=30000)
-        except Exception:
-            await page.wait_for_timeout(5000)
-
-        value = await self._read_engine_sid_with_wait(page)
-        if not value:
-            # reload 可能掉回 SSO/登录页，重新搜索开页兜底
-            self._emit_log('[engineSid] 刷新后未取到 engineSid，重新搜索开页兜底', 'zc')
-            if await self._open_zc_page_via_search(context):
-                page = self._zc_page
+        value = ''
+        # 与其它 wangdian 搜索互斥，避免同时操作触发 Target crashed
+        async with self._wangdian_search_lock:
+            for attempt in range(1, MAX_RETRIES + 1):
                 try:
-                    await page.wait_for_load_state('networkidle', timeout=30000)
-                except Exception:
-                    await page.wait_for_timeout(5000)
-                value = await self._read_engine_sid_with_wait(page)
+                    self._emit_log(f'[engineSid] 第{attempt}次尝试打开客户经营分析...', 'zc')
+                    await self._zc_page.goto(WANGDIAN_INDEX_URL, wait_until='domcontentloaded', timeout=15000)
+                    await self._zc_page.wait_for_timeout(2000)
+                    await self._dismiss_announcement(self._zc_page, 'zc')
+                    if not await self._search_and_click(self._zc_page, ZC_SEARCH_KEYWORD, 'zc'):
+                        raise RuntimeError('搜索客户经营分析未点击成功')
+                    # 等待 zc 业务系统 iframe 加载完成（异步写入 sessionStorage）
+                    try:
+                        await self._zc_page.wait_for_load_state('networkidle', timeout=30000)
+                        self._emit_log('[engineSid] 客户经营分析页加载完成 (networkidle)', 'zc')
+                    except Exception:
+                        await self._zc_page.wait_for_timeout(5000)
+                        self._emit_log('[engineSid] networkidle 超时，按固定等待处理', 'zc')
+                    value = await self._read_engine_sid_with_wait(context)
+                    if value:
+                        break
+                    self._emit_log(f'[engineSid] 第{attempt}次未从 zc.sto.cn 读到 engineSid', 'zc')
+                except Exception as e:
+                    self._emit_log(f'[engineSid] 第{attempt}次异常: {e}', 'zc')
+                    # 探测页可能 crash，重建后重试
+                    self._zc_page = await self._recreate_probe_page(context, self._zc_page)
 
         if not value:
             self._emit_log('[engineSid] ✗ 未取到 engineSid', 'zc')
