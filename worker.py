@@ -959,7 +959,7 @@ class BackgroundWorker(threading.Thread):
             total_partial = sum(1 for v in report_status.values() if v.get('partial'))
             total_fail = sum(1 for v in report_status.values() if not v['ok'] and not v.get('partial') and v.get('error') != '未采集到')
 
-            self._emit_status({'report_status': report_status})
+            self._emit_status({'report_status': report_status, 'account': account_name})
 
             summary_parts = [f'成功{total_success}']
             if total_partial > 0:

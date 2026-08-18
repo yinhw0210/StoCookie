@@ -55,10 +55,24 @@ class TrayIcon(QSystemTrayIcon):
     def _toggle_pause(self):
         if self._pause_action.text() == '暂停':
             self._worker.pause()
-            self._pause_action.setText('恢复')
+            self.set_paused(True)
+            # 同步主窗口 UI（若已绑定）
+            if hasattr(self._window, 'set_paused_ui'):
+                self._window.set_paused_ui(True)
         else:
             self._worker.resume()
-            self._pause_action.setText('暂停')
+            self.set_paused(False)
+            if hasattr(self._window, 'set_paused_ui'):
+                self._window.set_paused_ui(False)
+
+    def set_paused(self, paused: bool):
+        """仅更新托盘菜单的暂停/恢复文案（由主窗口 UI 统一驱动）。"""
+        self._pause_action.setText('恢复' if paused else '暂停')
+
+    def on_status(self, data: dict):
+        """接收 worker 状态推送，保持托盘菜单与主窗口一致。"""
+        if 'paused' in data:
+            self.set_paused(bool(data['paused']))
 
     def _quit(self):
         self._worker.stop()

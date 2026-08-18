@@ -39,6 +39,9 @@ def main():
 
     window = MainWindow(worker)
     tray = TrayIcon(window, worker)
+    window.set_tray(tray)
+    # 托盘菜单与主窗口共享暂停态：worker 推送的 paused 状态同步到托盘
+    worker.signals.status_update.connect(tray.on_status)
     tray.show()
     window.show()
 

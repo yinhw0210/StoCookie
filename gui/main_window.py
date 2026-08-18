@@ -1,109 +1,105 @@
-import os
-import platform
-import html as _html
+"""StoCookie 主窗口（仪表盘）。
+
+信息架构：
+  ┌ 顶部状态栏：标识 + 运行态药丸 + 当前账号 + 操作按钮
+  ├ KPI 指标卡：会话健康 / 下次同步 / 下次心跳 / 上报成功率 / 运行时长
+  ├ 左：上报明细（申通网点 / 拼多多 / 客户经营分析 分组，逐项状态）
+  └ 右：上报成功率趋势图 + 结构化日志（级别过滤 + 搜索）
+  └ 底部状态条：最近上报时间 + 连接状态
+
+所有数据来自 worker.signals（log_message / status_update），本窗口只消费、不持有业务状态。
+"""
+import re
+import time
 
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QPlainTextEdit, QFrame, QTabWidget,
-    QGridLayout, QSizePolicy,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QFrame, QScrollArea, QSplitter, QSizePolicy,
 )
-from PySide6.QtCore import Qt, Slot
-from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtCore import Qt, Slot, QTimer
 
 from gui.styles import DARK_THEME
+from gui.widgets import (
+    SectionTitle, MetricCard, StatePill, AccountChip,
+    ReportGroup, COLOR_OK, COLOR_FAIL, COLOR_PARTIAL, COLOR_BLUE, COLOR_TEXT,
+)
+from gui.log_panel import LogPanel
+from gui.trend_widget import TrendWidget
 from cookie_collector import EXPECTED_REPORT_ITEMS
-
-
-class _StatusCard(QFrame):
-    def __init__(self, label_text: str):
-        super().__init__()
-        self.setObjectName('statusCard')
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 6, 10, 6)
-        layout.setSpacing(2)
-
-        self._label = QLabel(label_text)
-        self._label.setObjectName('statusLabel')
-        self._label.setAlignment(Qt.AlignCenter)
-
-        self._value = QLabel('--')
-        self._value.setObjectName('statusValue')
-        self._value.setAlignment(Qt.AlignCenter)
-
-        layout.addWidget(self._label)
-        layout.addWidget(self._value)
-
-    def set_value(self, text: str, color: str = '#e0e0e0'):
-        self._value.setText(text)
-        self._value.setStyleSheet(f'color: {color}; font-size: 14px; font-weight: 600;')
-
-
-class _ReportItem(QFrame):
-    def __init__(self):
-        super().__init__()
-        self.setObjectName('reportItem')
-        self.setFixedHeight(24)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 2, 6, 2)
-        layout.setSpacing(6)
-
-        self._dot = QFrame()
-        self._dot.setObjectName('dotPending')
-        self._dot.setFixedSize(8, 8)
-
-        self._name = QLabel('--')
-        self._name.setObjectName('reportItemName')
-        self._name.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-
-        self._time = QLabel('')
-        self._time.setObjectName('reportItemTime')
-
-        layout.addWidget(self._dot)
-        layout.addWidget(self._name)
-        layout.addWidget(self._time)
-
-    def update_status(self, name: str, ok: bool = False, partial: bool = False, error: str = '', time_str: str = ''):
-        self._name.setText(name)
-        self._time.setText(time_str)
-        if error == '未采集到':
-            self._dot.setObjectName('dotPending')
-        elif ok:
-            self._dot.setObjectName('dotOk')
-        elif partial:
-            self._dot.setObjectName('dotPartial')
-        else:
-            self._dot.setObjectName('dotFail')
-        self._dot.setStyle(self._dot.style())
+from worker import ZC_STATUS_LABEL
 
 
 class MainWindow(QMainWindow):
     def __init__(self, worker):
         super().__init__()
         self._worker = worker
-        self.setWindowTitle('StoCookie')
-        self.setMinimumSize(580, 660)
+        self._tray = None
+
+        # 本地 UI 状态（仅用于展示）
+        self._start_time = time.time()
+        self._paused = False
+        self._maintaining = False
+        self._login_error = False
+        self._next_collect = 0
+        self._next_heartbeat = 0
+        self._last_sync_time = ''
+
+        self.setWindowTitle('StoCookie · 申通网点登录态代理')
+        self.setMinimumSize(1000, 720)
+        self.resize(1080, 760)
         self.setStyleSheet(DARK_THEME)
+
         self._build_ui()
         self._connect_signals()
 
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(1000)
+
+    # ----------------------------------------------------------------- UI
     def _build_ui(self):
         central = QWidget()
         central.setObjectName('centralWidget')
         self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(12)
 
-        # 标题栏
+        root.addWidget(self._build_header())
+        root.addWidget(self._build_kpi_row())
+        root.addWidget(self._build_splitter(), stretch=1)
+        root.addWidget(self._build_status_bar())
+
+    def _build_header(self):
         header = QFrame()
-        header.setObjectName('headerFrame')
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(12, 8, 12, 8)
+        header.setObjectName('appHeader')
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(14, 10, 14, 10)
+        hl.setSpacing(10)
 
+        title_group = QVBoxLayout()
+        title_group.setSpacing(2)
+        row1 = QHBoxLayout()
+        row1.setSpacing(8)
+        dot = QFrame()
+        dot.setObjectName('titleDot')
         title = QLabel('StoCookie')
         title.setObjectName('appTitle')
-        header_layout.addWidget(title)
-        header_layout.addStretch()
+        row1.addWidget(dot)
+        row1.addWidget(title)
+        row1.addStretch()
+        subtitle = QLabel('申通网点登录态代理 · Cookie 保活上报')
+        subtitle.setObjectName('appSubtitle')
+        title_group.addLayout(row1)
+        title_group.addWidget(subtitle)
+        hl.addLayout(title_group)
+
+        hl.addStretch()
+        self._pill = StatePill()
+        self._account_chip = AccountChip()
+        hl.addWidget(self._pill)
+        hl.addWidget(self._account_chip)
+        hl.addSpacing(12)
 
         self._btn_sync = QPushButton('立即同步')
         self._btn_sync.setObjectName('btnSync')
@@ -113,82 +109,114 @@ class MainWindow(QMainWindow):
         self._btn_pause.setObjectName('btnPause')
         self._btn_settings = QPushButton('设置')
         self._btn_settings.setObjectName('btnSettings')
+        for b in (self._btn_sync, self._btn_login, self._btn_pause, self._btn_settings):
+            hl.addWidget(b)
+        return header
 
-        for btn in (self._btn_sync, self._btn_login, self._btn_pause, self._btn_settings):
-            header_layout.addWidget(btn)
+    def _build_kpi_row(self):
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        self._card_health = MetricCard('会话健康')
+        self._card_collect = MetricCard('下次同步')
+        self._card_heartbeat = MetricCard('下次心跳')
+        self._card_rate = MetricCard('上报成功率')
+        self._card_uptime = MetricCard('运行时长')
+        for c in (self._card_health, self._card_collect, self._card_heartbeat,
+                  self._card_rate, self._card_uptime):
+            c.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            row.addWidget(c)
+        return row
 
-        layout.addWidget(header)
+    def _build_splitter(self):
+        splitter = QSplitter(Qt.Horizontal)
 
-        # 状态卡片行
-        status_row = QHBoxLayout()
-        status_row.setSpacing(8)
-        self._card_login = _StatusCard('登录状态')
-        self._card_countdown = _StatusCard('下次同步')
-        self._card_heartbeat = _StatusCard('心跳状态')
-        status_row.addWidget(self._card_login)
-        status_row.addWidget(self._card_countdown)
-        status_row.addWidget(self._card_heartbeat)
-        layout.addLayout(status_row)
+        # 左侧：上报明细
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(10)
+        left_layout.addWidget(SectionTitle('上报明细'))
+        self._sto_group = ReportGroup('申通网点 · STO Cookie')
+        self._sto_group.set_rows([it['label'] for it in EXPECTED_REPORT_ITEMS])
+        self._pdd_group = ReportGroup('拼多多 · PDD')
+        self._pdd_group.set_rows(['SUB_PASS_ID (PDD)'])
+        self._zc_group = ReportGroup('客户经营分析 · engineSid')
+        self._zc_group.set_rows([ZC_STATUS_LABEL])
+        left_layout.addWidget(self._sto_group)
+        left_layout.addWidget(self._pdd_group)
+        left_layout.addWidget(self._zc_group)
+        left_layout.addStretch()
 
-        # 上报状态区
-        report_frame = QFrame()
-        report_frame.setObjectName('reportFrame')
-        report_layout = QVBoxLayout(report_frame)
-        report_layout.setContentsMargins(10, 8, 10, 8)
-        report_layout.setSpacing(6)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(left)
 
-        report_header = QHBoxLayout()
-        self._lbl_report_title = QLabel('上报状态')
-        self._lbl_report_title.setObjectName('reportTitle')
-        self._lbl_report_summary = QLabel('')
-        self._lbl_report_summary.setObjectName('reportSummary')
-        report_header.addWidget(self._lbl_report_title)
-        report_header.addStretch()
-        report_header.addWidget(self._lbl_report_summary)
-        report_layout.addLayout(report_header)
+        # 右侧：趋势 + 日志
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(10)
+        self._trend = TrendWidget()
+        self._log_panel = LogPanel()
+        right_layout.addWidget(self._trend)
+        right_layout.addWidget(self._log_panel, stretch=1)
 
-        self._report_grid = QGridLayout()
-        self._report_grid.setSpacing(4)
-        self._report_items: dict[str, _ReportItem] = {}
-        report_layout.addLayout(self._report_grid)
+        splitter.addWidget(scroll)
+        splitter.addWidget(right)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        return splitter
 
-        # 预初始化固定顺序的上报项，避免随到达顺序变化、重启后排列不定
-        self._init_report_items()
+    def _build_status_bar(self):
+        bar = QFrame()
+        bar.setObjectName('statusBar')
+        hl = QHBoxLayout(bar)
+        hl.setContentsMargins(12, 6, 12, 6)
+        hl.setSpacing(8)
+        conn = QFrame()
+        conn.setObjectName('connDot')
+        self._status_text = QLabel('正在启动…')
+        self._status_text.setObjectName('statusText')
+        hl.addWidget(conn)
+        hl.addWidget(self._status_text)
+        hl.addStretch()
+        self._heartbeat_text = QLabel('')
+        self._heartbeat_text.setObjectName('statusText')
+        hl.addWidget(self._heartbeat_text)
+        return bar
 
-        layout.addWidget(report_frame)
-
-        # 日志 Tab
-        self._tab_widget = QTabWidget()
-        self._log_views = {}
-        log_font = QFont('JetBrains Mono', 11)
-        log_font.setStyleHint(QFont.Monospace)
-
-        for tab_name in ('全部', '登录', '上报', '心跳', 'PDD', 'ZC', '错误'):
-            text_edit = QPlainTextEdit()
-            text_edit.setReadOnly(True)
-            text_edit.setFont(log_font)
-            # 容量上限：保留最近 5000 行，避免长时间运行后内存膨胀卡顿
-            text_edit.setMaximumBlockCount(5000)
-            self._tab_widget.addTab(text_edit, tab_name)
-            self._log_views[tab_name] = text_edit
-
-        layout.addWidget(self._tab_widget, stretch=1)
-
+    # ----------------------------------------------------------------- 信号
     def _connect_signals(self):
         self._btn_sync.clicked.connect(self._worker.trigger_sync)
         self._btn_login.clicked.connect(self._worker.trigger_login)
         self._btn_pause.clicked.connect(self._toggle_pause)
         self._btn_settings.clicked.connect(self._open_settings)
-        self._worker.signals.log_message.connect(self._on_log)
+        self._worker.signals.log_message.connect(self._log_panel.add)
         self._worker.signals.status_update.connect(self._on_status)
+
+    def set_tray(self, tray):
+        self._tray = tray
 
     def _toggle_pause(self):
         if self._worker.is_paused:
             self._worker.resume()
-            self._btn_pause.setText('暂停')
+            self.set_paused_ui(False)
         else:
             self._worker.pause()
-            self._btn_pause.setText('恢复')
+            self.set_paused_ui(True)
+
+    def set_paused_ui(self, paused: bool):
+        """统一的暂停态 UI 驱动（主窗口按钮 / 托盘菜单共用）。"""
+        self._paused = paused
+        self._btn_pause.setText('恢复' if paused else '暂停')
+        if self._tray:
+            self._tray.set_paused(paused)
+        if paused:
+            self._card_collect.set_value('⏸ 已暂停', COLOR_PARTIAL)
+            self._card_heartbeat.set_value('⏸ 已暂停', COLOR_PARTIAL)
+        else:
+            self._update_countdown()
+        self._refresh_pill()
 
     def _open_settings(self):
         from gui.settings_dialog import SettingsDialog
@@ -200,136 +228,127 @@ class MainWindow(QMainWindow):
         )
         dlg.exec()
 
-    def _ensure_report_item(self, label: str) -> _ReportItem:
-        if label not in self._report_items:
-            item = _ReportItem()
-            idx = len(self._report_items)
-            row = idx // 2
-            col = idx % 2
-            self._report_grid.addWidget(item, row, col)
-            self._report_items[label] = item
-        return self._report_items[label]
-
-    def _init_report_items(self):
-        """按固定顺序预创建上报矩阵，避免顺序随到达时机变化、重启后排列不定。"""
-        labels = [item['label'] for item in EXPECTED_REPORT_ITEMS]
-        labels.append('PDD: SUB_PASS_ID (PDD)')
-        labels.append('engineSid (客户经营分析)')
-        for label in labels:
-            self._ensure_report_item(label)
-
-    # 日志级别判定关键词（按颜色分组）
-    _LOG_ERROR_KW = ('失败', '异常', '过期', '超时', '错误', 'ERROR', '✗')
-    _LOG_WARN_KW = ('WARNING', '⚠', '跳过', '未变化')
-    _LOG_OK_KW = ('成功', '✓', '正常', '完成')
-
-    def _log_color(self, msg: str) -> str:
-        if any(kw in msg for kw in self._LOG_ERROR_KW):
-            return '#ef4444'
-        if any(kw in msg for kw in self._LOG_WARN_KW):
-            return '#f59e0b'
-        if any(kw in msg for kw in self._LOG_OK_KW):
-            return '#10b981'
-        return '#c9d1d9'
-
-    def _append_log(self, view, msg: str):
-        color = self._log_color(msg)
-        safe = _html.escape(msg)
-        view.appendHtml(f'<span style="color:{color};white-space:pre-wrap">{safe}</span>')
-
-    @Slot(str, str)
-    def _on_log(self, msg: str, category: str):
-        all_view = self._log_views['全部']
-        self._append_log(all_view, msg)
-        all_view.moveCursor(QTextCursor.End)
-
-        tab_map = {'login': '登录', 'report': '上报', 'heartbeat': '心跳', 'pdd': 'PDD', 'zc': 'ZC'}
-        if category in tab_map:
-            view = self._log_views[tab_map[category]]
-            self._append_log(view, msg)
-            view.moveCursor(QTextCursor.End)
-
-        if any(kw in msg for kw in self._LOG_ERROR_KW) or 'WARNING' in msg or '⚠' in msg:
-            err_view = self._log_views['错误']
-            self._append_log(err_view, msg)
-            err_view.moveCursor(QTextCursor.End)
-
+    # ----------------------------------------------------------------- 状态
     @Slot(dict)
     def _on_status(self, data: dict):
+        if 'account' in data:
+            self._account = data['account']
+            self._account_chip.set_account(self._account)
+
         if 'login' in data:
-            text = data['login']
-            color = '#10b981' if '成功' in text or '已登录' in text or '启动' not in text and '失败' not in text else '#f59e0b'
-            if '失败' in text:
-                color = '#ef4444'
-            self._card_login.set_value(text, color)
+            self._apply_login_text(data['login'])
+
+        if 'paused' in data:
+            self.set_paused_ui(bool(data['paused']))
 
         if 'sync' in data:
-            pass  # 汇总信息在 report_status 中展示
+            self._apply_sync_text(data['sync'])
 
         if 'heartbeat' in data:
-            text = data['heartbeat']
-            color = '#10b981' if '正常' in text else '#f59e0b' if '检测' in text else '#ef4444'
-            self._card_heartbeat.set_value(text, color)
+            self._heartbeat_text.setText(f'心跳：{data["heartbeat"]}')
 
         if 'next_collect' in data:
-            secs = data['next_collect']
-            h, rem = divmod(secs, 3600)
-            m, s = divmod(rem, 60)
-            self._card_countdown.set_value(f'{h:02d}:{m:02d}:{s:02d}', '#60a5fa')
+            self._next_collect = data['next_collect']
+            self._card_collect.set_value(self._fmt(self._next_collect), COLOR_BLUE)
 
-        if 'paused' in data and data['paused']:
-            self._card_countdown.set_value('⏸ 已暂停', '#f59e0b')
+        if 'next_heartbeat' in data:
+            self._next_heartbeat = data['next_heartbeat']
+            self._card_heartbeat.set_value(self._fmt(self._next_heartbeat), COLOR_BLUE)
 
         if 'report_status' in data:
-            report_status = data['report_status']
-            total_ok = 0
-            total_partial = 0
-            total_fail = 0
-            total_missing = 0
-
-            for label, info in report_status.items():
-                item = self._ensure_report_item(label)
-                time_str = info.get('time', '')
-                error = info.get('error', '')
-                ok = info.get('ok', False)
-                partial = info.get('partial', False)
-                item.update_status(label, ok=ok, partial=partial, error=error, time_str=time_str)
-
-                if error == '未采集到':
-                    total_missing += 1
-                elif ok:
-                    total_ok += 1
-                elif partial:
-                    total_partial += 1
-                else:
-                    total_fail += 1
-
-            parts = []
-            if total_ok: parts.append(f'成功{total_ok}')
-            if total_partial: parts.append(f'部分{total_partial}')
-            if total_fail: parts.append(f'失败{total_fail}')
-            if total_missing: parts.append(f'未采集{total_missing}')
-            self._lbl_report_summary.setText(' / '.join(parts))
+            self._apply_report_status(data['report_status'])
 
         if 'pdd_status' in data:
-            pdd_status = data['pdd_status']
-            for label, info in pdd_status.items():
-                item = self._ensure_report_item(f'PDD: {label}')
-                time_str = info.get('time', '')
-                error = info.get('error', '')
-                ok = info.get('ok', False)
-                partial = info.get('partial', False)
-                item.update_status(f'PDD: {label}', ok=ok, partial=partial, error=error, time_str=time_str)
+            for label, info in data['pdd_status'].items():
+                self._pdd_group.update_item(label, **self._row_kwargs(info))
 
         if 'zc_status' in data:
-            zc_status = data['zc_status']
-            for label, info in zc_status.items():
-                item = self._ensure_report_item(label)
-                time_str = info.get('time', '')
-                error = info.get('error', '')
-                ok = info.get('ok', False)
-                partial = info.get('partial', False)
-                item.update_status(label, ok=ok, partial=partial, error=error, time_str=time_str)
+            for label, info in data['zc_status'].items():
+                self._zc_group.update_item(label, **self._row_kwargs(info))
+
+    def _row_kwargs(self, info: dict) -> dict:
+        return {
+            'ok': info.get('ok', False),
+            'partial': info.get('partial', False),
+            'error': info.get('error', ''),
+            'time_str': info.get('time', ''),
+        }
+
+    def _apply_login_text(self, text: str):
+        if '登录中' in text:
+            self._maintaining, self._login_error = True, False
+        elif '登录失败' in text:
+            self._maintaining, self._login_error = False, True
+        elif '已登录' in text:
+            self._maintaining, self._login_error = False, False
+        # '启动中…' 等不重置维护态
+        self._refresh_pill()
+
+    def _apply_sync_text(self, text: str):
+        m = re.search(r'\((\d{1,2}:\d{2}:\d{2})\)', text)
+        if m:
+            self._last_sync_time = m.group(1)
+        self._status_text.setText(f'最近上报：{self._last_sync_time or "—"}')
+
+    def _apply_report_status(self, report_status: dict):
+        total = len(report_status)
+        ok = fail = partial = missing = 0
+        for label, info in report_status.items():
+            self._sto_group.update_item(label, **self._row_kwargs(info))
+            if info.get('error') == '未采集到':
+                missing += 1
+            elif info.get('ok'):
+                ok += 1
+            elif info.get('partial'):
+                partial += 1
+            else:
+                fail += 1
+
+        # 会话健康
+        if fail > 0:
+            self._card_health.set_value('异常', COLOR_FAIL, f'{fail} 项上报失败')
+        elif missing > 0:
+            self._card_health.set_value('部分缺失', COLOR_PARTIAL, f'{missing} 项未采集')
+        else:
+            self._card_health.set_value('正常', COLOR_OK, f'{ok}/{total} 项成功')
+
+        # 上报成功率
+        rate = round(ok / total * 100) if total else 0
+        color = COLOR_OK if rate >= 100 else COLOR_PARTIAL if rate >= 50 else COLOR_FAIL
+        self._card_rate.set_value(f'{rate}%', color, f'{ok}/{total} 成功')
+        self._trend.add_rate(rate)
+
+    def _refresh_pill(self):
+        if self._paused:
+            self._pill.set_state('paused')
+        elif self._maintaining:
+            self._pill.set_state('maintaining')
+        elif self._login_error:
+            self._pill.set_state('error')
+        else:
+            self._pill.set_state('running')
+
+    # ----------------------------------------------------------------- 计时
+    def _tick(self):
+        if not self._paused:
+            if self._next_collect > 0:
+                self._next_collect = max(0, self._next_collect - 1)
+            if self._next_heartbeat > 0:
+                self._next_heartbeat = max(0, self._next_heartbeat - 1)
+            self._update_countdown()
+        elapsed = int(time.time() - self._start_time)
+        self._card_uptime.set_value(self._fmt(elapsed), COLOR_TEXT)
+
+    def _update_countdown(self):
+        self._card_collect.set_value(self._fmt(self._next_collect), COLOR_BLUE)
+        self._card_heartbeat.set_value(self._fmt(self._next_heartbeat), COLOR_BLUE)
+
+    @staticmethod
+    def _fmt(secs: int) -> str:
+        secs = max(0, int(secs))
+        h, rem = divmod(secs, 3600)
+        m, s = divmod(rem, 60)
+        return f'{h:02d}:{m:02d}:{s:02d}'
 
     def closeEvent(self, event):
         event.ignore()
