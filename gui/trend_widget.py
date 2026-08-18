@@ -4,7 +4,7 @@
 帮助运维一眼看出登录态是否稳定（成功率持续 100% 即健康，
 频繁掉到低位 = 会话经常被踢、需要排查）。
 """
-from PySide6.QtWidgets import QFrame, QVBoxLayout, QLabel, QHBoxLayout
+from PySide6.QtWidgets import QFrame, QVBoxLayout, QLabel, QHBoxLayout, QSizePolicy
 from PySide6.QtCore import Qt
 from PySide6.QtGui import (
     QPainter, QColor, QPen, QBrush, QLinearGradient, QPainterPath, QFont,
@@ -22,7 +22,9 @@ class TrendWidget(QFrame):
         self._relogins = 0
         self._last_rate = None
         self.setMinimumHeight(150)
-        self.setSizePolicy(self.sizePolicy().horizontalPolicy(), Qt.PreferredSize)
+        sp = self.sizePolicy()
+        sp.setVerticalPolicy(QSizePolicy.Preferred)
+        self.setSizePolicy(sp)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(14, 12, 14, 12)
