@@ -5,17 +5,17 @@
 import html as _html
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit, QPlainTextEdit,
+    QWidget, QFrame, QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit, QPlainTextEdit,
 )
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QFont
 
 _LEVELS = ('全部', '信息', '成功', '警告', '错误')
 _LEVEL_COLOR = {
-    '成功': '#10b981',
-    '警告': '#f59e0b',
-    '错误': '#ef4444',
-    '信息': '#c9d1d9',
+    '成功': '#3fb950',   # --ok
+    '警告': '#d29922',   # --warn
+    '错误': '#f85149',   # --bad
+    '信息': '#9aa0a8',   # --sub（原 #c9d1d9）
 }
 # 关键词 -> 级别（命中即归类，优先级 错误 > 警告 > 成功 > 信息）
 _ERR_KW = ('失败', '异常', '过期', '超时', '错误', 'ERROR', '✗')
@@ -33,7 +33,7 @@ def _classify(msg: str) -> str:
     return '信息'
 
 
-class LogPanel(QWidget):
+class LogPanel(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName('logPanel')
@@ -98,7 +98,7 @@ class LogPanel(QWidget):
         return True
 
     def _append(self, msg: str, level: str):
-        color = _LEVEL_COLOR.get(level, '#c9d1d9')
+        color = _LEVEL_COLOR.get(level, '#9aa0a8')
         self._view.appendHtml(
             f'<span style="color:{color};white-space:pre-wrap">{_html.escape(msg)}</span>'
         )

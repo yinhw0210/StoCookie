@@ -9,14 +9,16 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 
-# 状态色板（与 styles.py 保持一致）
-COLOR_OK = '#10b981'
-COLOR_FAIL = '#ef4444'
-COLOR_PARTIAL = '#f59e0b'
-COLOR_PENDING = '#4b5563'
-COLOR_BLUE = '#60a5fa'
-COLOR_TEXT = '#e6edf3'
-COLOR_MUTED = '#5b6678'
+# 状态色板（与 styles.py 保持一致，申通橙主题）
+COLOR_OK = '#3fb950'        # 成功
+COLOR_FAIL = '#f85149'      # 失败 / 错误
+COLOR_PARTIAL = '#d29922'   # 部分成功 / 暂停 / 警告
+COLOR_PENDING = '#686d76'   # 未采集 / 弱文字
+COLOR_INFO = '#58a6ff'      # 信息 / 重登中（维护态药丸）
+COLOR_ACCENT = '#ff7a1a'    # 申通橙强调：倒计时数值
+COLOR_TEXT = '#e6e7ea'      # 主文字
+COLOR_MUTED = '#686d76'     # 弱文字
+COLOR_SUB = '#9aa0a8'       # 次文字
 
 
 class SectionTitle(QWidget):
@@ -67,11 +69,11 @@ class StatePill(QFrame):
     """运行状态药丸：运行中 / 已暂停 / 重登中 / 异常，自带配色。"""
 
     _STYLES = {
-        'running': (COLOR_OK, '#06281f', '运行中'),
-        'paused': (COLOR_PARTIAL, '#2a1f06', '已暂停'),
-        'maintaining': (COLOR_BLUE, '#0a1d3a', '重登中'),
-        'error': (COLOR_FAIL, '#2a0a0a', '登录异常'),
-        'starting': ('#8892b0', '#1b2740', '启动中'),
+        'running': (COLOR_OK, 'rgba(63,185,80,0.14)', '运行中'),
+        'paused': (COLOR_PARTIAL, 'rgba(210,153,34,0.14)', '已暂停'),
+        'maintaining': (COLOR_INFO, 'rgba(88,166,255,0.14)', '重登中'),
+        'error': (COLOR_FAIL, 'rgba(248,81,73,0.14)', '登录异常'),
+        'starting': (COLOR_SUB, '#212329', '启动中'),
     }
 
     def __init__(self, parent=None):
@@ -87,9 +89,10 @@ class StatePill(QFrame):
         self._text.setObjectName('pillText')
         layout.addWidget(self._dot)
         layout.addWidget(self._text)
+        self.set_state('starting')
 
     def set_state(self, kind: str, text: str = None):
-        color, bg, default = self._STYLES.get(kind, ('#8892b0', '#1b2740', '未知'))
+        color, bg, default = self._STYLES.get(kind, (COLOR_SUB, '#212329', '未知'))
         self.setStyleSheet(f'background-color:{bg};border:1px solid {color};border-radius:14px;')
         self._dot.setStyleSheet(f'background-color:{color};border-radius:4px;')
         self._text.setText(text or default)

@@ -53,7 +53,7 @@ class TrendWidget(QFrame):
     def bump_relogin(self):
         self._relogins += 1
         self._stat.setText(f'重登 {self._relogins} 次')
-        self._stat.setStyleSheet('color:#f59e0b;font-size:11px;font-weight:600;')
+        self._stat.setStyleSheet('color:#d29922;font-size:11px;font-weight:600;')
 
     def set_last_rate(self, rate: int):
         self._last_rate = max(0, min(100, int(rate)))
@@ -67,7 +67,7 @@ class _Canvas(QFrame):
         super().__init__(owner)
         self._owner = owner
         self.setObjectName('trendCanvas')
-        self.setStyleSheet('background-color:#0f1420;border-radius:8px;')
+        self.setStyleSheet('background-color:#14161a;border-radius:8px;')
         self.setMinimumHeight(96)
 
     def paintEvent(self, event):
@@ -83,18 +83,18 @@ class _Canvas(QFrame):
         plot_h = h - pad_t - pad_b
 
         # 网格线（25/50/75/100%）
-        grid = QPen(QColor('#243049'))
+        grid = QPen(QColor('#2c2f36'))
         grid.setWidth(1)
         painter.setPen(grid)
         font = QFont('JetBrains Mono', 9)
         painter.setFont(font)
-        painter.setPen(QColor('#3a4a66'))
+        painter.setPen(QColor(255, 255, 255, 13))
         for pct in (0, 25, 50, 75, 100):
             y = pad_t + plot_h * (1 - pct / 100)
             painter.drawLine(pad_l, y, w - pad_r, y)
 
         if not rates:
-            painter.setPen(QColor('#5b6678'))
+            painter.setPen(QColor('#686d76'))
             painter.drawText(self.rect(), Qt.AlignCenter, '等待首个采集周期…')
             return
 
@@ -116,12 +116,12 @@ class _Canvas(QFrame):
         area.lineTo(x_at(0), pad_t + plot_h)
         area.closeSubpath()
         grad = QLinearGradient(0, pad_t, 0, pad_t + plot_h)
-        grad.setColorAt(0, QColor(67, 97, 238, 120))
-        grad.setColorAt(1, QColor(67, 97, 238, 8))
+        grad.setColorAt(0, QColor(255, 122, 26, 89))
+        grad.setColorAt(1, QColor(255, 122, 26, 0))
         painter.fillPath(area, QBrush(grad))
 
         # 折线
-        line_pen = QPen(QColor('#60a5fa'))
+        line_pen = QPen(QColor('#ff9442'))
         line_pen.setWidth(2)
         painter.setPen(line_pen)
         painter.drawPath(path)
@@ -129,10 +129,10 @@ class _Canvas(QFrame):
         # 末端高亮点 + 数值
         last_x = x_at(n - 1)
         last_y = y_at(rates[-1])
-        painter.setBrush(QBrush(QColor('#60a5fa')))
+        painter.setBrush(QBrush(QColor('#ff9442')))
         painter.setPen(Qt.NoPen)
         painter.drawEllipse(last_x - 3, last_y - 3, 6, 6)
-        painter.setPen(QColor('#cbd5e1'))
+        painter.setPen(QColor('#e6e7ea'))
         painter.drawText(
             max(pad_l, min(last_x - 26, w - pad_r - 30)),
             max(pad_t + 10, last_y - 8),

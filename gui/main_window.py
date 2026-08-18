@@ -21,7 +21,7 @@ from PySide6.QtCore import Qt, Slot, QTimer
 from gui.styles import DARK_THEME
 from gui.widgets import (
     SectionTitle, MetricCard, StatePill, AccountChip,
-    ReportGroup, COLOR_OK, COLOR_FAIL, COLOR_PARTIAL, COLOR_BLUE, COLOR_TEXT,
+    ReportGroup, COLOR_OK, COLOR_FAIL, COLOR_PARTIAL, COLOR_ACCENT, COLOR_TEXT,
 )
 from gui.log_panel import LogPanel
 from gui.trend_widget import TrendWidget
@@ -135,6 +135,7 @@ class MainWindow(QMainWindow):
 
         # 左侧：上报明细
         left = QWidget()
+        left.setObjectName('scrollBody')
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(10)
@@ -252,11 +253,11 @@ class MainWindow(QMainWindow):
 
         if 'next_collect' in data:
             self._next_collect = data['next_collect']
-            self._card_collect.set_value(self._fmt(self._next_collect), COLOR_BLUE)
+            self._card_collect.set_value(self._fmt(self._next_collect), COLOR_ACCENT)
 
         if 'next_heartbeat' in data:
             self._next_heartbeat = data['next_heartbeat']
-            self._card_heartbeat.set_value(self._fmt(self._next_heartbeat), COLOR_BLUE)
+            self._card_heartbeat.set_value(self._fmt(self._next_heartbeat), COLOR_ACCENT)
 
         if 'report_status' in data:
             self._apply_report_status(data['report_status'])
@@ -343,8 +344,8 @@ class MainWindow(QMainWindow):
         self._card_uptime.set_value(self._fmt(elapsed), COLOR_TEXT)
 
     def _update_countdown(self):
-        self._card_collect.set_value(self._fmt(self._next_collect), COLOR_BLUE)
-        self._card_heartbeat.set_value(self._fmt(self._next_heartbeat), COLOR_BLUE)
+        self._card_collect.set_value(self._fmt(self._next_collect), COLOR_ACCENT)
+        self._card_heartbeat.set_value(self._fmt(self._next_heartbeat), COLOR_ACCENT)
 
     @staticmethod
     def _fmt(secs: int) -> str:

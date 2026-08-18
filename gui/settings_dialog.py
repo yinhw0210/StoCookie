@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 
@@ -15,7 +17,7 @@ from gui.styles import DARK_THEME
 class _ProactiveRuleRow(QFrame):
     def __init__(self, rule: dict = None, parent=None):
         super().__init__(parent)
-        self.setStyleSheet('background-color: #0f3460; border-radius: 6px; padding: 6px;')
+        self.setStyleSheet('background-color: #212329; border: 1px solid #2c2f36; border-radius: 6px; padding: 6px;')
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(4)
@@ -40,7 +42,7 @@ class _ProactiveRuleRow(QFrame):
         self._btn_remove = QPushButton('✕')
         self._btn_remove.setFixedSize(22, 22)
         self._btn_remove.setStyleSheet(
-            'background-color: #ef4444; color: white; border-radius: 4px; font-size: 11px; padding: 0;'
+            'background-color: #f85149; color: white; border-radius: 4px; font-size: 11px; padding: 0;'
         )
 
         row1.addWidget(self._edit_cookie, stretch=1)
@@ -89,7 +91,7 @@ class SettingsDialog(QDialog):
 
         # 基础配置
         section_label = QLabel('基础配置')
-        section_label.setStyleSheet('color: #60a5fa; font-size: 13px; font-weight: 600;')
+        section_label.setStyleSheet('color: #e6e7ea; font-size: 13px; font-weight: 600;')
         layout.addWidget(section_label)
 
         form = QFormLayout()
@@ -115,7 +117,7 @@ class SettingsDialog(QDialog):
         # 预判刷新配置
         proactive_header = QHBoxLayout()
         proactive_label = QLabel('预判刷新')
-        proactive_label.setStyleSheet('color: #60a5fa; font-size: 13px; font-weight: 600;')
+        proactive_label.setStyleSheet('color: #e6e7ea; font-size: 13px; font-weight: 600;')
         btn_add_rule = QPushButton('+ 添加规则')
         btn_add_rule.setObjectName('btnLogin')
         btn_add_rule.setFixedHeight(24)
@@ -126,7 +128,7 @@ class SettingsDialog(QDialog):
         layout.addLayout(proactive_header)
 
         proactive_hint = QLabel('偏移: 正数=过期后延迟刷新, 负数=过期前提前刷新, 0=到期立即刷新')
-        proactive_hint.setStyleSheet('color: #64748b; font-size: 11px;')
+        proactive_hint.setStyleSheet('color: #686d76; font-size: 11px;')
         layout.addWidget(proactive_hint)
 
         self._proactive_container = QVBoxLayout()
@@ -143,7 +145,7 @@ class SettingsDialog(QDialog):
 
         # PDD 配置
         pdd_label = QLabel('PDD 站点')
-        pdd_label.setStyleSheet('color: #60a5fa; font-size: 13px; font-weight: 600;')
+        pdd_label.setStyleSheet('color: #e6e7ea; font-size: 13px; font-weight: 600;')
         layout.addWidget(pdd_label)
 
         self._chk_pdd_enabled = QCheckBox('启用 PDD 采集')
@@ -163,7 +165,7 @@ class SettingsDialog(QDialog):
         layout.addLayout(pdd_form)
 
         hint = QLabel('PDD 配置修改后需重启程序生效')
-        hint.setStyleSheet('color: #64748b; font-size: 11px;')
+        hint.setStyleSheet('color: #686d76; font-size: 11px;')
         layout.addWidget(hint)
 
         # 分隔线
@@ -171,7 +173,7 @@ class SettingsDialog(QDialog):
 
         # 客户经营分析 engineSid 配置
         zc_label = QLabel('客户经营分析 (engineSid)')
-        zc_label.setStyleSheet('color: #60a5fa; font-size: 13px; font-weight: 600;')
+        zc_label.setStyleSheet('color: #e6e7ea; font-size: 13px; font-weight: 600;')
         layout.addWidget(zc_label)
 
         self._chk_zc_enabled = QCheckBox('启用 engineSid 采集')
@@ -188,7 +190,7 @@ class SettingsDialog(QDialog):
         layout.addLayout(zc_form)
 
         zc_hint = QLabel('每次刷新页面 engineSid 都会变；独立时间线，间隔修改后即时生效')
-        zc_hint.setStyleSheet('color: #64748b; font-size: 11px;')
+        zc_hint.setStyleSheet('color: #686d76; font-size: 11px;')
         layout.addWidget(zc_hint)
 
         # 分隔线
@@ -222,7 +224,7 @@ class SettingsDialog(QDialog):
     def _add_separator(self, layout):
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet('background-color: #2d3748; max-height: 1px;')
+        sep.setStyleSheet('background-color: #2c2f36; max-height: 1px;')
         layout.addWidget(sep)
 
     def _add_proactive_rule(self, rule=None):
