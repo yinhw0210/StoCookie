@@ -90,6 +90,17 @@ class BackgroundWorker(threading.Thread):
         self._wangdian_search_lock = None
         self._login_lock = None
         self._zc_page = None
+        # 登录协调：登录是破坏性全局操作（clear_cookies + 关页），
+        # 置 True 期间所有探测协程必须让路，避免用失效引用/脏 cookie 操作
+        self._maintaining = False
+        # 探测 page 提升为实例属性，便于登录时主动关闭使其下轮重建
+        self._spf_probe_page = None
+        # 探测协程 task 引用，用于 stop 时 cancel / 等待退出
+        self._spf_probe_task = None
+        self._engine_sid_task = None
+        self._pdd_task = None
+        # PDD 最近一次上报是否成功，用于合并状态计数（替代无条件 +1）
+        self._pdd_last_ok = None
 
         settings = _load_settings()
         # 从持久化恢复已知 spf_sid 值（用于跨重启检测值变化）
@@ -119,6 +130,10 @@ class BackgroundWorker(threading.Thread):
     @property
     def zc_enabled(self):
         return self._zc_enabled
+
+    @property
+    def is_paused(self):
+        return self._paused
 
     def run(self):
         os.makedirs(STORAGE_DIR, exist_ok=True)
@@ -172,10 +187,13 @@ class BackgroundWorker(threading.Thread):
             last_heartbeat = time.time()
 
             # 启动 spf_sid 探测协程（独立 page，随机间隔 30s/1min/3min）
-            asyncio.create_task(self._probe_spf_sid_loop(context))
+            self._spf_probe_task = asyncio.create_task(self._probe_spf_sid_loop(context))
 
             # 启动 engineSid 探测协程（独立 page + 独立时间线，默认每 30 分钟刷新上报）
-            asyncio.create_task(self._probe_engine_sid_loop(context))
+            self._engine_sid_task = asyncio.create_task(self._probe_engine_sid_loop(context))
+
+            # 启动 PDD 独立协程（独立时间线，不再阻塞主循环 5s tick）
+            self._pdd_task = asyncio.create_task(self._probe_pdd_loop())
 
             while not self._stop_event.is_set():
                 if self._paused:
@@ -187,13 +205,16 @@ class BackgroundWorker(threading.Thread):
                     self._manual_login_event.clear()
                     await self._do_login(context)
                     await self._open_persistent_pages(context)
+                    # 手动登录后重置倒计时并触发一次采集，与手动同步行为一致
+                    sync_start = time.time()
+                    await self._do_collect_and_report(context)
+                    last_sync = sync_start if self._countdown_from_start else time.time()
+                    last_heartbeat = last_sync
 
                 if self._manual_sync_event.is_set():
                     self._manual_sync_event.clear()
                     sync_start = time.time()
                     await self._do_sync_cycle(context)
-                    if self._pdd:
-                        await self._do_pdd_sync_cycle()
                     last_sync = sync_start if self._countdown_from_start else time.time()
                     last_heartbeat = last_sync
 
@@ -205,15 +226,11 @@ class BackgroundWorker(threading.Thread):
                 if proactive_due:
                     sync_start = time.time()
                     await self._do_proactive_refresh(context)
-                    if self._pdd:
-                        await self._do_pdd_sync_cycle()
                     last_sync = sync_start if self._countdown_from_start else time.time()
                     last_heartbeat = last_sync
                 elif sync_due:
                     sync_start = time.time()
                     await self._do_sync_cycle(context)
-                    if self._pdd:
-                        await self._do_pdd_sync_cycle()
                     last_sync = sync_start if self._countdown_from_start else time.time()
                     last_heartbeat = last_sync
                 elif heartbeat_due:
@@ -230,6 +247,9 @@ class BackgroundWorker(threading.Thread):
                 })
 
                 await asyncio.sleep(5)
+
+            # 主循环退出，等待所有探测协程结束再关 browser，避免脏退出
+            await self._await_probe_tasks()
 
             await browser.close()
 
@@ -287,14 +307,25 @@ class BackgroundWorker(threading.Thread):
             await page.close()
 
     async def _do_login(self, context):
-        """重新登录（带互斥锁）：主循环与探测协程可能并发触发登录，
+        """重新登录（带互斥锁 + 维护态协调）：主循环与探测协程可能并发触发登录，
         两个 _do_login 并发会互相 clear_cookies 导致登录全部失败，
-        因此用锁保证任意时刻只有一个登录流程在执行。"""
+        因此用锁保证任意时刻只有一个登录流程在执行。
+        _maintaining 标志让探测协程在登录期间让路，避免用到被清空的 cookie / 被关的 page。"""
         async with self._login_lock:
-            return await self._do_login_locked(context)
+            # 已登录跳过：若其它流程刚登录成功，不再 clear_cookies 破坏其成果
+            if await self._already_logged_in(context):
+                self._emit_log('检测到已有有效登录，跳过重复登录', 'login')
+                return True
+            self._maintaining = True
+            try:
+                return await self._do_login_locked(context)
+            finally:
+                self._maintaining = False
 
     async def _do_login_locked(self, context):
         self._emit_status({'login': '登录中...'})
+        # 关闭探测 page，使其下轮重建（cookie 即将被清空，旧 page 会失效）
+        await self._close_probe_pages()
         # 清空 context 中所有 cookie，避免 _check_session 等前置操作
         # 留下的不完整 SSO cookie 干扰登录流程导致 403 重定向循环
         await context.clear_cookies()
@@ -350,6 +381,30 @@ class BackgroundWorker(threading.Thread):
             except Exception:
                 pass
             self._login_page = None
+
+    async def _already_logged_in(self, context) -> bool:
+        """快速判断是否已登录：sto 域存在 WD_SESSION 视为已登录。
+        用于避免并发触发的冗余登录 clear_cookies 破坏前一次登录成果。"""
+        try:
+            cookies = await context.cookies()
+            return any(
+                c['name'] == 'WD_SESSION' and 'sto.cn' in c.get('domain', '')
+                for c in cookies
+            )
+        except Exception:
+            return False
+
+    async def _close_probe_pages(self):
+        """关闭探测 page（spf_sid / engineSid），登录后强制重建，
+        避免探测协程继续使用持有失效 cookie 的旧 page。"""
+        for attr in ('_spf_probe_page', '_zc_page'):
+            page = getattr(self, attr, None)
+            if page and not page.is_closed():
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+            setattr(self, attr, None)
 
     async def _do_sso_login_on_page(self, page):
         """在已经跳转到 SSO 页面的 page 上完成钉钉登录，不导航到 wangdian"""
@@ -929,9 +984,12 @@ class BackgroundWorker(threading.Thread):
         if not hasattr(self, '_sto_summary') or self._sto_summary is None:
             return
         total_success, total_partial, total_fail, total_missing, now_str = self._sto_summary
-        # 加上 PDD 的计数
+        # 加上 PDD 的计数（按最近一次真实上报结果，不再无条件计成功）
         if self._pdd:
-            total_success += 1  # PDD 总是采集 1 条 SUB_PASS_ID
+            if self._pdd_last_ok:
+                total_success += 1
+            elif self._pdd_last_ok is False:
+                total_fail += 1
         summary_parts = [f'成功{total_success}']
         if total_partial > 0:
             summary_parts.append(f'部分成功{total_partial}')
@@ -1019,84 +1077,63 @@ class BackgroundWorker(threading.Thread):
     async def _probe_spf_sid_loop(self, context):
         """spf_sid 探测协程：独立 page，随机间隔打开订单查询页面，
         检测 spf_sid 值变化。新值存储并触发上报，cookie 缺失则重新登录。
-        搜索失败会回到 wangdian 首页重试（最多 3 次），全失败才触发登录。"""
+        登录维护态（_maintaining）期间让路，暂停（_paused）时跳过本轮。"""
         import random
         MAX_RETRIES = 3
         self._emit_log('[spf_sid探测] 协程启动', 'report')
-        probe_page = None
         try:
-            probe_page = await context.new_page()
+            self._spf_probe_page = await context.new_page()
             while not self._stop_event.is_set():
+                # 暂停或登录维护态期间让路，不操作 context
+                if self._paused:
+                    await asyncio.sleep(5)
+                    continue
+                if self._maintaining:
+                    self._emit_log('[spf_sid探测] 登录维护中，跳过本轮', 'report')
+                    await asyncio.sleep(5)
+                    continue
+
                 search_ok = False
-                # 每轮开始确保探测页面可用（可能已被重登/异常关闭或 crash）
-                if probe_page is None or probe_page.is_closed():
-                    probe_page = await context.new_page()
+                # 每轮开始确保探测页面可用（可能已被登录关闭 / 异常关闭或 crash）
+                if self._spf_probe_page is None or self._spf_probe_page.is_closed():
+                    self._spf_probe_page = await context.new_page()
 
                 # 与主循环 wangdian 搜索互斥（同一把锁），避免同时操作首页搜索框
                 async with self._wangdian_search_lock:
                     for attempt in range(1, MAX_RETRIES + 1):
                         try:
                             self._emit_log(f'[spf_sid探测] 第{attempt}次尝试...', 'report')
-                            await probe_page.goto(WANGDIAN_INDEX_URL, wait_until='domcontentloaded', timeout=15000)
-                            await probe_page.wait_for_timeout(2000)
-                            await self._dismiss_announcement(probe_page, 'spf_probe')
-                            await self._search_and_click(probe_page, '订单查询', 'spf_probe')
+                            await self._spf_probe_page.goto(WANGDIAN_INDEX_URL, wait_until='domcontentloaded', timeout=15000)
+                            await self._spf_probe_page.wait_for_timeout(2000)
+                            await self._dismiss_announcement(self._spf_probe_page, 'spf_probe')
+                            await self._search_and_click(self._spf_probe_page, '订单查询', 'spf_probe')
                             # 等待订单查询页加载完成（页面异步加载，接口响应后种下相关 cookie）
                             try:
-                                await probe_page.wait_for_load_state('networkidle', timeout=30000)
+                                await self._spf_probe_page.wait_for_load_state('networkidle', timeout=30000)
                                 self._emit_log('[spf_sid探测] 订单查询页加载完成 (networkidle)', 'report')
                             except Exception:
                                 # networkidle 超时（页面可能持续轮询），兜底等待
-                                await probe_page.wait_for_timeout(5000)
+                                await self._spf_probe_page.wait_for_timeout(5000)
                                 self._emit_log('[spf_sid探测] networkidle 超时，按固定等待处理', 'report')
                             search_ok = True
                             break
                         except Exception as e:
                             if attempt < MAX_RETRIES:
                                 self._emit_log(f'[spf_sid探测] 搜索失败({attempt}/{MAX_RETRIES}): {e}，重建探测页面重试...', 'report')
-                                probe_page = await self._recreate_probe_page(context, probe_page)
+                                self._spf_probe_page = await self._recreate_probe_page(context, self._spf_probe_page)
                             else:
                                 self._emit_log(f'[spf_sid探测] 搜索全部失败({MAX_RETRIES}/{MAX_RETRIES}): {e}', 'report')
 
                 if not search_ok:
                     self._emit_log(f'[spf_sid探测] 订单查询不可用，触发重新登录', 'report')
-                    if self._login_lock and self._login_lock.locked():
-                        self._emit_log('[spf_sid探测] 已有登录在进行，跳过本轮（下轮再检测）', 'report')
-                    else:
-                        try:
-                            login_ok = await self._do_login(context)
-                            if login_ok:
-                                await self._open_persistent_pages(context)
-                                # 重登清空了 cookie，probe_page 状态可能已失效，重建
-                                probe_page = await self._recreate_probe_page(context, probe_page)
-                                self._known_spf_sid_values.clear()
-                                self._persist_known_spf_sid_values()
-                                await self._do_collect_and_report(context)
-                                self._emit_combined_sync_status()
-                            else:
-                                self._emit_log('[spf_sid探测] 登录失败，跳过本轮（下轮再检测）', 'report')
-                        except Exception as e2:
-                            self._emit_log(f'[spf_sid探测] 重新登录也失败: {e2}', 'report')
+                    await self._spf_sid_handle_login(context)
                 else:
                     cookies = await context.cookies()
                     spf = next((c for c in cookies if c['name'] == 'spf_sid'), None)
 
                     if not spf:
                         self._emit_log('[spf_sid探测] ✗ spf_sid 仍缺失，触发重新登录', 'report')
-                        if self._login_lock and self._login_lock.locked():
-                            self._emit_log('[spf_sid探测] 已有登录在进行，跳过本轮（下轮再检测）', 'report')
-                        else:
-                            login_ok = await self._do_login(context)
-                            if login_ok:
-                                await self._open_persistent_pages(context)
-                                # 重登清空了 cookie，probe_page 状态可能已失效，重建
-                                probe_page = await self._recreate_probe_page(context, probe_page)
-                                self._known_spf_sid_values.clear()
-                                self._persist_known_spf_sid_values()
-                                await self._do_collect_and_report(context)
-                                self._emit_combined_sync_status()
-                            else:
-                                self._emit_log('[spf_sid探测] 登录失败，跳过本轮（下轮再检测）', 'report')
+                        await self._spf_sid_handle_login(context)
                     else:
                         spf_value = spf['value']
                         if spf_value not in self._known_spf_sid_values:
@@ -1112,9 +1149,33 @@ class BackgroundWorker(threading.Thread):
                 self._emit_log(f'[spf_sid探测] 下一轮探测在 {interval}s 后', 'report')
                 await asyncio.sleep(interval)
         finally:
-            if probe_page and not probe_page.is_closed():
-                await probe_page.close()
+            if self._spf_probe_page and not self._spf_probe_page.is_closed():
+                try:
+                    await self._spf_probe_page.close()
+                except Exception:
+                    pass
+            self._spf_probe_page = None
             self._emit_log('[spf_sid探测] 协程退出', 'report')
+
+    async def _spf_sid_handle_login(self, context):
+        """spf_sid 探测触发登录的统一处理：直接 await _do_login。
+        _do_login 锁内已有「已登录跳过」保护，不会破坏其它流程刚完成的登录成果，
+        从根上消除原来 _login_lock.locked() 预检查的 TOCTOU 竞态。"""
+        try:
+            login_ok = await self._do_login(context)
+            if login_ok:
+                await self._open_persistent_pages(context)
+                # 重登已关闭 probe_page，这里确保重建
+                if self._spf_probe_page is None or self._spf_probe_page.is_closed():
+                    self._spf_probe_page = await context.new_page()
+                self._known_spf_sid_values.clear()
+                self._persist_known_spf_sid_values()
+                await self._do_collect_and_report(context)
+                self._emit_combined_sync_status()
+            else:
+                self._emit_log('[spf_sid探测] 登录失败，跳过本轮（下轮再检测）', 'report')
+        except Exception as e2:
+            self._emit_log(f'[spf_sid探测] 重新登录也失败: {e2}', 'report')
 
     def _persist_known_spf_sid_values(self):
         """将已知 spf_sid 值写入 settings.json，用于跨重启检测值变化。"""
@@ -1295,6 +1356,14 @@ class BackgroundWorker(threading.Thread):
             if not self._zc_enabled:
                 await asyncio.sleep(10)
                 continue
+            # 暂停或登录维护态期间让路
+            if self._paused:
+                await asyncio.sleep(5)
+                continue
+            if self._maintaining:
+                self._emit_log('[engineSid] 登录维护中，跳过本轮', 'zc')
+                await asyncio.sleep(5)
+                continue
             try:
                 await self._refresh_and_report_engine_sid(context)
             except Exception as e:
@@ -1373,6 +1442,7 @@ class BackgroundWorker(threading.Thread):
         now_str = datetime.now().strftime('%H:%M:%S')
         payloads = await self._pdd.collect()
         if not payloads:
+            self._pdd_last_ok = False
             self._emit_status({'pdd_status': {'SUB_PASS_ID (PDD)': {'ok': False, 'error': '未采集到', 'time': now_str}}})
             self._emit_combined_sync_status()
             return
@@ -1391,8 +1461,47 @@ class BackgroundWorker(threading.Thread):
             else:
                 self._emit_log(f'PDD: ✗ SUB_PASS_ID 上报失败 → {info.get("error", "")}', 'pdd')
                 self._emit_status({'pdd_status': {'SUB_PASS_ID (PDD)': info}})
+        self._pdd_last_ok = info.get('ok', False) if reports else False
         self._emit_combined_sync_status()
         self._emit_log('PDD: === 同步周期结束 ===', 'pdd')
+
+    async def _probe_pdd_loop(self):
+        """PDD 独立时间线协程：按采集间隔定时 check_session + 采集上报。
+        从主循环移出，避免 PDD 登录重试阻塞主循环 5s tick 和状态上报。
+        暂停期间让路。"""
+        if not self._pdd:
+            return
+        self._emit_log('PDD: 独立协程启动', 'pdd')
+        # 首次稍等，和 STO 首次上报错开
+        await asyncio.sleep(15)
+        while not self._stop_event.is_set():
+            if self._paused:
+                await asyncio.sleep(5)
+                continue
+            try:
+                await self._do_pdd_sync_cycle()
+            except Exception as e:
+                self._emit_log(f'PDD: 协程周期异常: {e}', 'pdd')
+            # 按采集间隔等待，期间可响应停止 / 暂停
+            target = max(1, self._collect_interval) * 60
+            waited = 0
+            while waited < target and not self._stop_event.is_set():
+                await asyncio.sleep(5)
+                waited += 5
+        self._emit_log('PDD: 独立协程退出', 'pdd')
+
+    async def _await_probe_tasks(self):
+        """主循环退出后，cancel 并等待所有探测协程结束，再让 browser.close() 执行，
+        避免协程仍持有 page 引用导致脏退出。"""
+        tasks = [t for t in (self._spf_probe_task, self._engine_sid_task, self._pdd_task) if t]
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        for t in tasks:
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
 
     def trigger_sync(self):
         self._manual_sync_event.set()
