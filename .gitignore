@@ -40,3 +40,6 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+
+# WorkBuddy agent data (local tool state, not project code)
+.workbuddy/

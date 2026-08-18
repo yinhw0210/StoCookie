@@ -1167,10 +1167,19 @@ class BackgroundWorker(threading.Thread):
             if alive:
                 self._emit_status({'heartbeat': '正常'})
                 self._emit_log('心跳正常', 'heartbeat')
-            else:
-                self._emit_status({'heartbeat': 'Session 过期'})
-                self._emit_log('心跳检测: Session 过期，需重新登录', 'heartbeat')
-            return alive
+                return True
+
+            self._emit_status({'heartbeat': 'Session 过期'})
+            self._emit_log('心跳检测: Session 过期，开始重新登录', 'heartbeat')
+            login_ok = await self._do_login(context)
+            if not login_ok:
+                self._emit_log('心跳重登失败', 'heartbeat')
+                return False
+            await self._open_persistent_pages(context)
+            self._emit_status({'heartbeat': '正常'})
+            self._emit_log('心跳重登完成，开始采集上报', 'heartbeat')
+            await self._do_collect_and_report(context)
+            return True
         except Exception as e:
             self._emit_status({'heartbeat': f'异常: {e}'})
             self._emit_log(f'心跳异常: {e}', 'heartbeat')
