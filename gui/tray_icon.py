@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import QSystemTrayIcon, QMenu
 from PySide6.QtGui import QIcon, QAction
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication, Slot
 
 from config import BASE_DIR
 import os
@@ -69,6 +69,7 @@ class TrayIcon(QSystemTrayIcon):
         """仅更新托盘菜单的暂停/恢复文案（由主窗口 UI 统一驱动）。"""
         self._pause_action.setText('恢复' if paused else '暂停')
 
+    @Slot(dict)
     def on_status(self, data: dict):
         """接收 worker 状态推送，保持托盘菜单与主窗口一致。"""
         if 'paused' in data:

@@ -114,7 +114,10 @@ class MainWindow(QMainWindow):
         return header
 
     def _build_kpi_row(self):
-        row = QHBoxLayout()
+        container = QWidget()
+        container.setObjectName('kpiRow')
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(10)
         self._card_health = MetricCard('会话健康')
         self._card_collect = MetricCard('下次同步')
@@ -125,7 +128,7 @@ class MainWindow(QMainWindow):
                   self._card_rate, self._card_uptime):
             c.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             row.addWidget(c)
-        return row
+        return container
 
     def _build_splitter(self):
         splitter = QSplitter(Qt.Horizontal)
