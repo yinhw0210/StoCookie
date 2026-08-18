@@ -1,15 +1,17 @@
 import os
 import platform
+import html as _html
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QTextEdit, QFrame, QTabWidget,
+    QLabel, QPushButton, QPlainTextEdit, QFrame, QTabWidget,
     QGridLayout, QSizePolicy,
 )
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QFont, QTextCursor
 
 from gui.styles import DARK_THEME
+from cookie_collector import EXPECTED_REPORT_ITEMS
 
 
 class _StatusCard(QFrame):
@@ -150,6 +152,9 @@ class MainWindow(QMainWindow):
         self._report_items: dict[str, _ReportItem] = {}
         report_layout.addLayout(self._report_grid)
 
+        # 预初始化固定顺序的上报项，避免随到达顺序变化、重启后排列不定
+        self._init_report_items()
+
         layout.addWidget(report_frame)
 
         # 日志 Tab
@@ -159,9 +164,11 @@ class MainWindow(QMainWindow):
         log_font.setStyleHint(QFont.Monospace)
 
         for tab_name in ('全部', '登录', '上报', '心跳', 'PDD', 'ZC', '错误'):
-            text_edit = QTextEdit()
+            text_edit = QPlainTextEdit()
             text_edit.setReadOnly(True)
             text_edit.setFont(log_font)
+            # 容量上限：保留最近 5000 行，避免长时间运行后内存膨胀卡顿
+            text_edit.setMaximumBlockCount(5000)
             self._tab_widget.addTab(text_edit, tab_name)
             self._log_views[tab_name] = text_edit
 
@@ -203,26 +210,49 @@ class MainWindow(QMainWindow):
             self._report_items[label] = item
         return self._report_items[label]
 
+    def _init_report_items(self):
+        """按固定顺序预创建上报矩阵，避免顺序随到达时机变化、重启后排列不定。"""
+        labels = [item['label'] for item in EXPECTED_REPORT_ITEMS]
+        labels.append('PDD: SUB_PASS_ID (PDD)')
+        labels.append('engineSid (客户经营分析)')
+        for label in labels:
+            self._ensure_report_item(label)
+
+    # 日志级别判定关键词（按颜色分组）
+    _LOG_ERROR_KW = ('失败', '异常', '过期', '超时', '错误', 'ERROR', '✗')
+    _LOG_WARN_KW = ('WARNING', '⚠', '跳过', '未变化')
+    _LOG_OK_KW = ('成功', '✓', '正常', '完成')
+
+    def _log_color(self, msg: str) -> str:
+        if any(kw in msg for kw in self._LOG_ERROR_KW):
+            return '#ef4444'
+        if any(kw in msg for kw in self._LOG_WARN_KW):
+            return '#f59e0b'
+        if any(kw in msg for kw in self._LOG_OK_KW):
+            return '#10b981'
+        return '#c9d1d9'
+
+    def _append_log(self, view, msg: str):
+        color = self._log_color(msg)
+        safe = _html.escape(msg)
+        view.appendHtml(f'<span style="color:{color};white-space:pre-wrap">{safe}</span>')
+
     @Slot(str, str)
     def _on_log(self, msg: str, category: str):
-        self._log_views['全部'].append(msg)
-        self._auto_scroll(self._log_views['全部'])
+        all_view = self._log_views['全部']
+        self._append_log(all_view, msg)
+        all_view.moveCursor(QTextCursor.End)
 
         tab_map = {'login': '登录', 'report': '上报', 'heartbeat': '心跳', 'pdd': 'PDD', 'zc': 'ZC'}
         if category in tab_map:
             view = self._log_views[tab_map[category]]
-            view.append(msg)
-            self._auto_scroll(view)
+            self._append_log(view, msg)
+            view.moveCursor(QTextCursor.End)
 
-        error_keywords = ('失败', '异常', '过期', '超时', '错误', 'ERROR', 'WARNING', '✗', '⚠')
-        if any(kw in msg for kw in error_keywords):
-            self._log_views['错误'].append(msg)
-            self._auto_scroll(self._log_views['错误'])
-
-    def _auto_scroll(self, text_edit: QTextEdit):
-        cursor = text_edit.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        text_edit.setTextCursor(cursor)
+        if any(kw in msg for kw in self._LOG_ERROR_KW) or 'WARNING' in msg or '⚠' in msg:
+            err_view = self._log_views['错误']
+            self._append_log(err_view, msg)
+            err_view.moveCursor(QTextCursor.End)
 
     @Slot(dict)
     def _on_status(self, data: dict):
