@@ -39,6 +39,20 @@ from cookie_collector import build_wangdian_kfsd_payload, collect_cookies, EXPEC
 from cookie_reporter import report_cookies
 from login import login_via_dingtalk, wait_for_wangdian_entry_or_role
 
+
+def _url_host(url: str) -> str:
+    """取 URL 的 host 段（用于判断刷新前后是否跨域跳转）。"""
+    try:
+        return url.split('//', 1)[1].split('/', 1)[0].split('?', 1)[0]
+    except Exception:
+        return ''
+
+
+def _is_finance_page(url: str) -> bool:
+    """finance-mng 页面（finance-mng.sto.cn / finance-fundmanage.sto.cn 为同一后端别名）。"""
+    return 'finance-mng.sto.cn' in url or 'finance-fundmanage.sto.cn' in url
+
+
 COOKIE_REPORT_LABELS = {
     'SESSION=': 'SESSION (finance-mng)',
     'cod=': 'cod (market-cod)',
@@ -782,14 +796,34 @@ class BackgroundWorker(threading.Thread):
                     self._emit_log(f'reload: {url}', 'heartbeat')
                     await page.reload(wait_until='domcontentloaded', timeout=15000)
 
-                await page.wait_for_timeout(2000)
-                self._emit_log(f'reload 后 URL: {page.url}', 'heartbeat')
+                # 刷新前记录 URL / host，用于刷新后比对（跨域跳转即视为过期）
+                pre_url = page.url
+                pre_host = _url_host(pre_url)
+
+                # finance-mng 为 SPA（sto-js-web），session 过期走客户端 JS 慢重定向，
+                # 固定 2s 往往读不到跳转，故对 finance 轮询最多 6s 捕获跳转。
+                if _is_finance_page(url):
+                    poll_deadline = time.monotonic() + 6
+                    while time.monotonic() < poll_deadline:
+                        await page.wait_for_timeout(500)
+                        post_u = page.url
+                        if is_auth_url(post_u) or _url_host(post_u) != pre_host:
+                            break
+                else:
+                    await page.wait_for_timeout(2000)
+                post_url = page.url
+                self._emit_log(f'reload 后 URL: {post_url}', 'heartbeat')
 
                 # chrome-error:// 页面无法恢复，直接抛异常走重新打开逻辑
-                if 'chrome-error://' in page.url or 'about:blank' in page.url:
-                    raise Exception(f'Page navigated to error: {page.url}')
+                if 'chrome-error://' in post_url or 'about:blank' in post_url:
+                    raise Exception(f'Page navigated to error: {post_url}')
 
-                if is_auth_url(page.url):
+                # 过期判定：① 跳到认证页；② 刷新后跨域（内容页 reload 后跳到其它 host，
+                # 如 finance-mng → sso.sto-express.cn），用于兜住慢/未知 SSO 跳转。
+                expired_now = is_auth_url(post_url) or (
+                    _url_host(post_url) != pre_host and not is_auth_url(pre_url)
+                )
+                if expired_now:
                     # market-cod 有独立 session，跳转到 SSO 不代表全局过期
                     # （page.sto.cn 实操中心已暂不启用）
                     if 'market-cod.sto.cn' in url:
@@ -925,6 +959,18 @@ class BackgroundWorker(threading.Thread):
             # 记录配置中关注的 cookie 获取时间（用于预判刷新）
             self._record_cookie_obtained_time(payloads)
 
+            # D: 上报前校验 finance-mng 页面是否仍处于登录页（防止上报已死的旧 cookie）。
+            # 仅对 finance-mng 页面做此校验；若其当前停在 SSO 登录页，说明 session 已过期，
+            # 丢弃 SESSION(finance-mng) 这条过期 cookie，不再向上报（避免后端收到废 cookie）。
+            finance_expired = False
+            finance_page = self._persistent_pages.get(FINANCE_FUNDMANAGE_URL)
+            if finance_page and not finance_page.is_closed() and is_auth_url(finance_page.url):
+                self._emit_log('[上报校验] finance-mng 页面已跳转登录页，丢弃过期 SESSION(finance-mng) cookie，不上报', 'report')
+                filtered = [p for p in payloads if self._resolve_cookie_label(p) != 'SESSION (finance-mng)']
+                if len(filtered) != len(payloads):
+                    payloads = filtered
+                    finance_expired = True
+
             if not payloads:
                 # 构建完整的未命中状态
                 report_status = {}
@@ -953,6 +999,12 @@ class BackgroundWorker(threading.Thread):
                     self._emit_log(f'⚠ {label} 部分上报成功 → {info.get("error", "")}', 'report')
                 else:
                     self._emit_log(f'✗ {label} 上报失败 → {info.get("error", "")}', 'report')
+
+            # D 续：finance-mng 因页面停在 SSO 被丢弃（未上报），标记为过期失败而非「未采集到」
+            if finance_expired and 'SESSION (finance-mng)' not in report_status:
+                report_status['SESSION (finance-mng)'] = {
+                    'ok': False, 'error': 'session 过期（页面已跳转登录，未上报）', 'time': now_str,
+                }
 
             # 补充未采集到的项目（在 EXPECTED_REPORT_ITEMS 中但不在 payloads 中的）
             for item in EXPECTED_REPORT_ITEMS:
