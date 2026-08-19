@@ -3,8 +3,9 @@
 信息架构：
   ┌ 顶部状态栏：标识 + 运行态药丸 + 当前账号 + 操作按钮
   ├ KPI 指标卡：会话健康 / 下次同步 / 下次心跳 / 上报成功率 / 运行时长
-  ├ 左：上报明细（申通网点 / 拼多多 / 客户经营分析 分组，逐项状态）
-  └ 右：上报成功率趋势图 + 结构化日志（级别过滤 + 搜索）
+  ├ 主区（左右分栏）：
+  │   左：上报明细（申通 STO / PDD / 客户经营，2 列紧凑网格，可滚动）
+  │   右：上报成功率趋势图（辅助位）+ 结构化日志（占主区，级别过滤 + 搜索）
   └ 底部状态条：最近上报时间 + 连接状态
 
 所有数据来自 worker.signals（log_message / status_update），本窗口只消费、不持有业务状态。
@@ -21,7 +22,7 @@ from PySide6.QtCore import Qt, Slot, QTimer
 from gui.styles import DARK_THEME
 from gui.widgets import (
     SectionTitle, MetricCard, StatePill, AccountChip,
-    ReportGroup, ReportRow, COLOR_OK, COLOR_FAIL, COLOR_PARTIAL, COLOR_ACCENT, COLOR_TEXT,
+    ReportRow, COLOR_OK, COLOR_FAIL, COLOR_PARTIAL, COLOR_ACCENT, COLOR_TEXT,
 )
 from gui.log_panel import LogPanel
 from gui.trend_widget import TrendWidget
@@ -68,7 +69,6 @@ class MainWindow(QMainWindow):
         root.addWidget(self._build_header())
         root.addWidget(self._build_kpi_row())
         root.addWidget(self._build_splitter(), stretch=1)
-        root.addWidget(self._build_report_panel())
         root.addWidget(self._build_status_bar())
 
     def _build_header(self):
@@ -132,27 +132,17 @@ class MainWindow(QMainWindow):
         return container
 
     def _build_splitter(self):
-        # 主区：趋势图（上，固定高）+ 结构化日志（下，自适应）
-        pane = QWidget()
-        pane.setObjectName('mainPane')
-        layout = QVBoxLayout(pane)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
-        self._trend = TrendWidget()
-        self._trend.setFixedHeight(160)
-        self._log_panel = LogPanel()
-        layout.addWidget(self._trend)
-        layout.addWidget(self._log_panel, stretch=1)
-        return pane
+        # 主区：左「上报明细」(2 列紧凑网格) + 右「趋势图 + 日志」
+        # 左右分栏，日志占右侧主区绝大部分高度，避免纵向叠放互相挤压。
+        splitter = QSplitter(Qt.Horizontal)
 
-    def _build_report_panel(self):
-        # 上报明细（底部，一行两个紧凑网格）：申通 STO 14 项 + PDD + 客户经营
-        panel = QWidget()
-        panel.setObjectName('reportPanel')
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-        layout.addWidget(SectionTitle('上报明细'))
+        # 左：上报明细（一行两个紧凑网格；正常窗口一屏看全，极小窗口可滚动）
+        left = QWidget()
+        left.setObjectName('scrollBody')
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(8)
+        left_layout.addWidget(SectionTitle('上报明细'))
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(6)
@@ -164,9 +154,29 @@ class MainWindow(QMainWindow):
             self._report_rows[lbl] = row
             r, c = divmod(idx, 2)
             grid.addWidget(row, r, c)
-        layout.addLayout(grid)
-        panel.setMaximumHeight(320)
-        return panel
+        left_layout.addLayout(grid)
+        left_layout.addStretch()
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(left)
+
+        # 右：趋势图（上，压缩为辅助位）+ 结构化日志（下，占满主区）
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(10)
+        self._trend = TrendWidget()
+        self._trend.setFixedHeight(130)
+        self._log_panel = LogPanel()
+        right_layout.addWidget(self._trend)
+        right_layout.addWidget(self._log_panel, stretch=1)
+
+        splitter.addWidget(scroll)
+        splitter.addWidget(right)
+        splitter.setStretchFactor(0, 4)
+        splitter.setStretchFactor(1, 6)
+        return splitter
 
     def _build_status_bar(self):
         bar = QFrame()

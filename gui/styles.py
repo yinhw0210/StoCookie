@@ -172,7 +172,6 @@ QLabel#muted {{ color: {MUTED}; font-size: 11px; }}
 QScrollArea {{ border: none; background: transparent; }}
 QScrollArea > QWidget#qt_scrollarea_viewport {{ background-color: {BG}; }}
 QWidget#scrollBody {{ background-color: {BG}; }}
-QWidget#reportPanel {{ background-color: transparent; }}
 QScrollBar:vertical {{ background-color: {TITLE}; width: 8px; border-radius: 4px; }}
 QScrollBar::handle:vertical {{ background-color: {BORDER}; border-radius: 4px; min-height: 20px; }}
 QScrollBar::handle:vertical:hover {{ background-color: {BORDER_STRONG}; }}
