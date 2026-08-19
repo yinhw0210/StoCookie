@@ -174,8 +174,12 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(scroll)
         splitter.addWidget(right)
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 6)
+        # 左右 1:1 等宽：子控件横向设为 Ignored，splitter 忽略其 sizeHint，纯按拉伸系数 1:1 分配
+        scroll.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        right.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([1, 1])
         return splitter
 
     def _build_status_bar(self):
