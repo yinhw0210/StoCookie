@@ -14,14 +14,14 @@ import time
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QScrollArea, QSplitter, QSizePolicy,
+    QFrame, QScrollArea, QSplitter, QSizePolicy, QGridLayout,
 )
 from PySide6.QtCore import Qt, Slot, QTimer
 
 from gui.styles import DARK_THEME
 from gui.widgets import (
     SectionTitle, MetricCard, StatePill, AccountChip,
-    ReportGroup, COLOR_OK, COLOR_FAIL, COLOR_PARTIAL, COLOR_ACCENT, COLOR_TEXT,
+    ReportGroup, ReportRow, COLOR_OK, COLOR_FAIL, COLOR_PARTIAL, COLOR_ACCENT, COLOR_TEXT,
 )
 from gui.log_panel import LogPanel
 from gui.trend_widget import TrendWidget
@@ -46,7 +46,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle('StoCookie · 申通网点登录态代理')
         self.setMinimumSize(1000, 720)
-        self.resize(1080, 760)
+        self.resize(1120, 820)
         self.setStyleSheet(DARK_THEME)
 
         self._build_ui()
@@ -68,6 +68,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self._build_header())
         root.addWidget(self._build_kpi_row())
         root.addWidget(self._build_splitter(), stretch=1)
+        root.addWidget(self._build_report_panel())
         root.addWidget(self._build_status_bar())
 
     def _build_header(self):
@@ -131,42 +132,41 @@ class MainWindow(QMainWindow):
         return container
 
     def _build_splitter(self):
-        splitter = QSplitter(Qt.Horizontal)
-
-        # 左侧：上报明细（直接承载，不内嵌滚动条；最小高度保护一屏可读）
-        left = QWidget()
-        left.setObjectName('scrollBody')
-        left.setMinimumHeight(480)
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(10)
-        left_layout.addWidget(SectionTitle('上报明细'))
-        self._sto_group = ReportGroup('申通网点 · STO Cookie')
-        self._sto_group.set_rows([it['label'] for it in EXPECTED_REPORT_ITEMS])
-        self._pdd_group = ReportGroup('拼多多 · PDD')
-        self._pdd_group.set_rows(['SUB_PASS_ID (PDD)'])
-        self._zc_group = ReportGroup('客户经营分析 · engineSid')
-        self._zc_group.set_rows([ZC_STATUS_LABEL])
-        left_layout.addWidget(self._sto_group)
-        left_layout.addWidget(self._pdd_group)
-        left_layout.addWidget(self._zc_group)
-        left_layout.addStretch()
-
-        # 右侧：趋势 + 日志
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(10)
+        # 主区：趋势图（上，固定高）+ 结构化日志（下，自适应）
+        pane = QWidget()
+        pane.setObjectName('mainPane')
+        layout = QVBoxLayout(pane)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
         self._trend = TrendWidget()
+        self._trend.setFixedHeight(160)
         self._log_panel = LogPanel()
-        right_layout.addWidget(self._trend)
-        right_layout.addWidget(self._log_panel, stretch=1)
+        layout.addWidget(self._trend)
+        layout.addWidget(self._log_panel, stretch=1)
+        return pane
 
-        splitter.addWidget(left)
-        splitter.addWidget(right)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
-        return splitter
+    def _build_report_panel(self):
+        # 上报明细（底部，一行两个紧凑网格）：申通 STO 14 项 + PDD + 客户经营
+        panel = QWidget()
+        panel.setObjectName('reportPanel')
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        layout.addWidget(SectionTitle('上报明细'))
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(6)
+        self._report_rows = {}
+        labels = [it['label'] for it in EXPECTED_REPORT_ITEMS]
+        labels += ['SUB_PASS_ID (PDD)', ZC_STATUS_LABEL]
+        for idx, lbl in enumerate(labels):
+            row = ReportRow(lbl)
+            self._report_rows[lbl] = row
+            r, c = divmod(idx, 2)
+            grid.addWidget(row, r, c)
+        layout.addLayout(grid)
+        panel.setMaximumHeight(320)
+        return panel
 
     def _build_status_bar(self):
         bar = QFrame()
@@ -261,11 +261,15 @@ class MainWindow(QMainWindow):
 
         if 'pdd_status' in data:
             for label, info in data['pdd_status'].items():
-                self._pdd_group.update_item(label, **self._row_kwargs(info))
+                r = self._report_rows.get(label)
+                if r:
+                    r.set_status(**self._row_kwargs(info))
 
         if 'zc_status' in data:
             for label, info in data['zc_status'].items():
-                self._zc_group.update_item(label, **self._row_kwargs(info))
+                r = self._report_rows.get(label)
+                if r:
+                    r.set_status(**self._row_kwargs(info))
 
     def _row_kwargs(self, info: dict) -> dict:
         return {
@@ -298,7 +302,9 @@ class MainWindow(QMainWindow):
         prod_ok = prod_total = 0
         test_ok = test_total = 0
         for label, info in report_status.items():
-            self._sto_group.update_item(label, **self._row_kwargs(info))
+            r = self._report_rows.get(label)
+            if r:
+                r.set_status(**self._row_kwargs(info))
             if info.get('error') == '未采集到':
                 missing += 1
             elif info.get('ok'):
