@@ -22,6 +22,9 @@ _ERR_KW = ('失败', '异常', '过期', '超时', '错误', 'ERROR', '✗')
 _WARN_KW = ('WARNING', '⚠', '跳过', '未变化', '未采集到')
 _OK_KW = ('成功', '✓', '正常', '完成', '已登录')
 
+# 用户只关心这两类特殊 cookie 的日志：spf_sid 探测、客户经营分析 engineSid 探测
+_KEY_KW = ('spf_sid', 'enginesid', 'engineSid', '客户经营', '客户经营分析')
+
 
 def _classify(msg: str) -> str:
     if any(kw in msg for kw in _ERR_KW):
@@ -33,14 +36,23 @@ def _classify(msg: str) -> str:
     return '信息'
 
 
+def _is_key(msg: str, category: str) -> bool:
+    """是否为「关键日志」：客户经营分析(zc)全部保留，或消息命中关键 cookie 关键词。"""
+    if category == 'zc':
+        return True
+    low = msg.lower()
+    return any(k in low for k in _KEY_KW)
+
+
 class LogPanel(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName('logPanel')
-        self._entries = []          # (原始文本, 级别)
+        self._entries = []          # (原始文本, 级别, 类别)
         self._max = 2000
         self._filter = '全部'
         self._search = ''
+        self._key_only = True       # 默认只展示关键日志
         self._build_ui()
 
     def _build_ui(self):
@@ -50,6 +62,15 @@ class LogPanel(QFrame):
 
         bar = QHBoxLayout()
         bar.setSpacing(6)
+
+        # 关键日志开关（默认开：仅展示 spf_sid / engineSid 相关）
+        self._key_btn = QPushButton('关键')
+        self._key_btn.setObjectName('logChip')
+        self._key_btn.setCheckable(True)
+        self._key_btn.setChecked(True)
+        self._key_btn.clicked.connect(self._toggle_key)
+        bar.addWidget(self._key_btn)
+
         self._chips = {}
         for name in _LEVELS:
             btn = QPushButton(name)
@@ -86,11 +107,17 @@ class LogPanel(QFrame):
             btn.setChecked(n == name)
         self._rebuild()
 
+    def _toggle_key(self, checked: bool):
+        self._key_only = checked
+        self._rebuild()
+
     def _on_search(self, text: str):
         self._search = text.strip().lower()
         self._rebuild()
 
-    def _pass(self, msg: str, level: str) -> bool:
+    def _pass(self, msg: str, level: str, category: str = '') -> bool:
+        if self._key_only and not _is_key(msg, category):
+            return False
         if self._filter != '全部' and level != self._filter:
             return False
         if self._search and self._search not in msg.lower():
@@ -105,15 +132,15 @@ class LogPanel(QFrame):
 
     def _rebuild(self):
         self._view.clear()
-        for msg, level in self._entries:
-            if self._pass(msg, level):
+        for msg, level, category in self._entries:
+            if self._pass(msg, level, category):
                 self._append(msg, level)
 
     @Slot(str, str)
     def add(self, msg: str, category: str = 'general'):
         level = _classify(msg)
-        self._entries.append((msg, level))
+        self._entries.append((msg, level, category))
         if len(self._entries) > self._max:
             self._entries.pop(0)
-        if self._pass(msg, level):
+        if self._pass(msg, level, category):
             self._append(msg, level)

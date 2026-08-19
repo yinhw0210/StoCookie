@@ -68,6 +68,18 @@ REPORT_URLS = [
     'https://lysto.com.cn/s/v1/normandy/api/controller/cust/netManager/settingCookie',
 ]
 
+# 上报目标环境映射：用于区分「正式 / 测试」环境，趋势图与上报明细按环境展示。
+# 键为上报 URL 的 host（含端口段），值为环境标识。lysto 为测试环境，经常发布可能上报失败。
+REPORT_ENV = {
+    'slinghang.cn': 'prod',   # 正式环境
+    'lysto.com.cn': 'test',   # 测试环境（经常发布，可能上报失败）
+}
+
+ENV_LABELS = {
+    'prod': '正式',
+    'test': '测试',
+}
+
 WANGDIAN_MAP_AREA_DETAIL_URL_MARKER = 'wangdian.sto.cn/order/collectMap/query/detail/mapAreaDetail'
 WANGDIAN_TRIGGER_INTERVAL_SECONDS = 5 * 60
 

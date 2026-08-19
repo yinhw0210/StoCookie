@@ -894,7 +894,7 @@ class BackgroundWorker(threading.Thread):
 
     def _build_report_status_info(self, results: list[dict], now_str: str) -> dict:
         targets = [
-            {'name': r['url'], 'ok': r['ok'], 'error': r.get('error')}
+            {'name': r['url'], 'env': r.get('env', 'unknown'), 'ok': r['ok'], 'error': r.get('error')}
             for r in results
         ]
         all_ok = bool(targets) and all(t['ok'] for t in targets)
@@ -906,6 +906,11 @@ class BackgroundWorker(threading.Thread):
             'time': now_str,
             'targets': targets,
         }
+        # 按环境聚合：正式 / 测试 各自是否全部成功（None 表示该环境无上报目标）
+        prod_targets = [t for t in targets if t['env'] == 'prod']
+        test_targets = [t for t in targets if t['env'] == 'test']
+        info['prod_ok'] = all(t['ok'] for t in prod_targets) if prod_targets else None
+        info['test_ok'] = all(t['ok'] for t in test_targets) if test_targets else None
         if errors:
             info['error'] = ', '.join(errors)
         return info

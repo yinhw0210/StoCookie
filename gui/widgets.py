@@ -20,6 +20,9 @@ COLOR_TEXT = '#e6e7ea'      # 主文字
 COLOR_MUTED = '#686d76'     # 弱文字
 COLOR_SUB = '#9aa0a8'       # 次文字
 
+# 环境标识中文名（用于上报明细 / 趋势图 tooltip）
+_ENV_LABELS = {'prod': '正式', 'test': '测试', 'unknown': '未知'}
+
 
 class SectionTitle(QWidget):
     """区块标题：左侧强调竖条 + 标题文字。"""
@@ -93,10 +96,11 @@ class StatePill(QFrame):
 
     def set_state(self, kind: str, text: str = None):
         color, bg, default = self._STYLES.get(kind, (COLOR_SUB, '#212329', '未知'))
-        self.setStyleSheet(f'background-color:{bg};border:1px solid {color};border-radius:14px;')
+        # 克制风格：无边框徽章，状态圆点用状态色，文字用中性主色（不喧宾夺主）
+        self.setStyleSheet(f'background-color:{bg};border:none;border-radius:12px;')
         self._dot.setStyleSheet(f'background-color:{color};border-radius:4px;')
         self._text.setText(text or default)
-        self._text.setStyleSheet(f'color:{color};font-weight:600;font-size:12px;')
+        self._text.setStyleSheet(f'color:{COLOR_TEXT};font-weight:600;font-size:12px;')
 
 
 class AccountChip(QFrame):
@@ -143,7 +147,7 @@ class ReportRow(QFrame):
         layout.addWidget(self._time)
         self._status_text = '待采集'
 
-    def set_status(self, ok: bool = False, partial: bool = False, error: str = '', time_str: str = ''):
+    def set_status(self, ok: bool = False, partial: bool = False, error: str = '', time_str: str = '', targets: list = None):
         self._time.setText(time_str)
         if error == '未采集到':
             color, self._status_text = COLOR_PENDING, '未采集到'
@@ -154,7 +158,17 @@ class ReportRow(QFrame):
         else:
             color, self._status_text = COLOR_FAIL, (error or '失败')
         self._dot.setStyleSheet(f'background-color:{color};border-radius:4px;')
-        self.setToolTip(f'{self._name}\n状态：{self._status_text}\n更新：{time_str or "—"}')
+        # tooltip：基础状态 + 按环境（正式 / 测试）拆分明细
+        tip = f'{self._name}\n状态：{self._status_text}\n更新：{time_str or "—"}'
+        if targets:
+            env_parts = []
+            for t in targets:
+                mark = '✓' if t.get('ok') else '✗'
+                env_name = _ENV_LABELS.get(t.get('env', 'unknown'), t.get('env', '未知'))
+                env_parts.append(f'{env_name}:{mark}')
+            if env_parts:
+                tip += '\n环境：' + '  '.join(env_parts)
+        self.setToolTip(tip)
 
 
 class ReportGroup(QFrame):

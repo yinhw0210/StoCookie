@@ -133,9 +133,10 @@ class MainWindow(QMainWindow):
     def _build_splitter(self):
         splitter = QSplitter(Qt.Horizontal)
 
-        # 左侧：上报明细
+        # 左侧：上报明细（直接承载，不内嵌滚动条；最小高度保护一屏可读）
         left = QWidget()
         left.setObjectName('scrollBody')
+        left.setMinimumHeight(480)
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(10)
@@ -151,10 +152,6 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self._zc_group)
         left_layout.addStretch()
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(left)
-
         # 右侧：趋势 + 日志
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -165,7 +162,7 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self._trend)
         right_layout.addWidget(self._log_panel, stretch=1)
 
-        splitter.addWidget(scroll)
+        splitter.addWidget(left)
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
@@ -276,6 +273,7 @@ class MainWindow(QMainWindow):
             'partial': info.get('partial', False),
             'error': info.get('error', ''),
             'time_str': info.get('time', ''),
+            'targets': info.get('targets', []),
         }
 
     def _apply_login_text(self, text: str):
@@ -297,6 +295,8 @@ class MainWindow(QMainWindow):
     def _apply_report_status(self, report_status: dict):
         total = len(report_status)
         ok = fail = partial = missing = 0
+        prod_ok = prod_total = 0
+        test_ok = test_total = 0
         for label, info in report_status.items():
             self._sto_group.update_item(label, **self._row_kwargs(info))
             if info.get('error') == '未采集到':
@@ -307,6 +307,16 @@ class MainWindow(QMainWindow):
                 partial += 1
             else:
                 fail += 1
+            # 按环境累计正式 / 测试 成功率
+            for t in info.get('targets', []):
+                if t.get('env') == 'prod':
+                    prod_total += 1
+                    if t.get('ok'):
+                        prod_ok += 1
+                elif t.get('env') == 'test':
+                    test_total += 1
+                    if t.get('ok'):
+                        test_ok += 1
 
         # 会话健康
         if fail > 0:
@@ -316,11 +326,13 @@ class MainWindow(QMainWindow):
         else:
             self._card_health.set_value('正常', COLOR_OK, f'{ok}/{total} 项成功')
 
-        # 上报成功率
+        # 上报成功率（总体 / 正式环境 / 测试环境）
         rate = round(ok / total * 100) if total else 0
         color = COLOR_OK if rate >= 100 else COLOR_PARTIAL if rate >= 50 else COLOR_FAIL
         self._card_rate.set_value(f'{rate}%', color, f'{ok}/{total} 成功')
-        self._trend.add_rate(rate)
+        prod_rate = round(prod_ok / prod_total * 100) if prod_total else None
+        test_rate = round(test_ok / test_total * 100) if test_total else None
+        self._trend.add_rate(rate, prod_rate, test_rate)
 
     def _refresh_pill(self):
         if self._paused:

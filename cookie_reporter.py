@@ -9,7 +9,7 @@ from urllib.parse import quote
 import httpx
 from loguru import logger
 
-from config import REPORT_URLS
+from config import REPORT_URLS, REPORT_ENV
 
 
 def _build_report_url(base_url: str, cookie_str: str, extra_params: dict | None = None) -> str:
@@ -22,6 +22,12 @@ def _build_report_url(base_url: str, cookie_str: str, extra_params: dict | None 
 
 def _short_name(base_url: str) -> str:
     return base_url.split('//')[1].split('.')[0]
+
+
+def _env_of(base_url: str) -> str:
+    """返回上报 URL 对应的环境标识（prod / test / unknown）。"""
+    host = base_url.split('//')[1].split('/')[0]
+    return REPORT_ENV.get(host, 'unknown')
 
 
 def _clip(text: str, limit: int = 1000) -> str:
@@ -159,6 +165,7 @@ async def report_cookies(payloads: list[str], emit_log=None, log_category: str =
             )
             for base_url in REPORT_URLS:
                 short_name = _short_name(base_url)
+                env = _env_of(base_url)
                 params_text = _request_params(cookie_str)
                 started_at = time.perf_counter()
                 try:
@@ -175,7 +182,7 @@ async def report_cookies(payloads: list[str], emit_log=None, log_category: str =
                     if resp.status_code == 200:
                         # 检查响应体是否包含错误信息
                         if '"code":0' in resp.text or '"success":true' in resp.text.lower() or len(resp.text) < 5:
-                            entry['results'].append({'url': short_name, 'ok': True, 'error': None})
+                            entry['results'].append({'url': short_name, 'env': env, 'ok': True, 'error': None})
                             _emit(
                                 emit_log,
                                 f'[上报出参] {idx}/{total} {short_name} OK status=200 elapsed={elapsed_ms}ms '
@@ -183,7 +190,7 @@ async def report_cookies(payloads: list[str], emit_log=None, log_category: str =
                                 category=log_category,
                             )
                         else:
-                            entry['results'].append({'url': short_name, 'ok': False, 'error': resp.text[:100]})
+                            entry['results'].append({'url': short_name, 'env': env, 'ok': False, 'error': resp.text[:100]})
                             _emit(
                                 emit_log,
                                 f'[上报出参] {idx}/{total} {short_name} FAIL status=200 elapsed={elapsed_ms}ms '
@@ -192,7 +199,7 @@ async def report_cookies(payloads: list[str], emit_log=None, log_category: str =
                                 category=log_category,
                             )
                     else:
-                        entry['results'].append({'url': short_name, 'ok': False, 'error': f'HTTP {resp.status_code}'})
+                        entry['results'].append({'url': short_name, 'env': env, 'ok': False, 'error': f'HTTP {resp.status_code}'})
                         _emit(
                             emit_log,
                             f'[上报出参] {idx}/{total} {short_name} FAIL status={resp.status_code} elapsed={elapsed_ms}ms '
@@ -203,7 +210,7 @@ async def report_cookies(payloads: list[str], emit_log=None, log_category: str =
                 except Exception as e:
                     elapsed_ms = int((time.perf_counter() - started_at) * 1000)
                     err_text = _error_text(e)
-                    entry['results'].append({'url': short_name, 'ok': False, 'error': err_text[:120]})
+                    entry['results'].append({'url': short_name, 'env': env, 'ok': False, 'error': err_text[:120]})
                     _emit(
                         emit_log,
                         f'[上报异常] {idx}/{total} {short_name} elapsed={elapsed_ms}ms endpoint={base_url} '
