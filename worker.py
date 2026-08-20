@@ -217,7 +217,7 @@ class BackgroundWorker(threading.Thread):
 
                 if self._manual_login_event.is_set():
                     self._manual_login_event.clear()
-                    await self._do_login(context)
+                    await self._do_login(context, force=True)
                     await self._open_persistent_pages(context)
                     # 手动登录后重置倒计时并触发一次采集，与手动同步行为一致
                     sync_start = time.time()
@@ -320,14 +320,19 @@ class BackgroundWorker(threading.Thread):
         finally:
             await page.close()
 
-    async def _do_login(self, context):
+    async def _do_login(self, context, *, force: bool = False):
         """重新登录（带互斥锁 + 维护态协调）：主循环与探测协程可能并发触发登录，
         两个 _do_login 并发会互相 clear_cookies 导致登录全部失败，
         因此用锁保证任意时刻只有一个登录流程在执行。
-        _maintaining 标志让探测协程在登录期间让路，避免用到被清空的 cookie / 被关的 page。"""
+        _maintaining 标志让探测协程在登录期间让路，避免用到被清空的 cookie / 被关的 page。
+        force=True 时绕过「已登录跳过」——用于 reload 已权威检测到某常驻页跳 SSO 的场景：
+        该页可能是与 wangdian(WD_SESSION) 不同的独立会话（如 front.sto.cn / finance-mng
+        走 sto-sso-web / sso.sto-express.cn），WD_SESSION 仍在不代表这些页面没过期，
+        必须强制重登 + clear_cookies + 重开全部常驻页，否则旧页面/旧 cookie 原地保留。"""
         async with self._login_lock:
-            # 已登录跳过：若其它流程刚登录成功，不再 clear_cookies 破坏其成果
-            if await self._already_logged_in(context):
+            # 已登录跳过：若其它流程刚登录成功，不再 clear_cookies 破坏其成果。
+            # 但 force 时不跳过（reload 已证伪「已登录」）。
+            if not force and await self._already_logged_in(context):
                 self._emit_log('检测到已有有效登录，跳过重复登录', 'login')
                 return True
             self._maintaining = True
@@ -549,7 +554,7 @@ class BackgroundWorker(threading.Thread):
             return True
 
         self._emit_log('Session 无效或未登录，开始单点登录流程', 'login')
-        login_ok = await self._do_login(context)
+        login_ok = await self._do_login(context, force=True)
         if not login_ok:
             self._emit_status({'login': '登录失败', 'sync': '等待登录'})
             self._emit_log('单点登录未完成，禁止访问业务页和上报 Cookie', 'login')
@@ -792,17 +797,19 @@ class BackgroundWorker(threading.Thread):
                     page = await context.new_page()
                     await page.goto(url, wait_until='domcontentloaded', timeout=15000)
                     self._persistent_pages[url] = page
+                    pre_url = page.url
                 else:
                     self._emit_log(f'reload: {url}', 'heartbeat')
+                    # 刷新前记录 URL / host，用于刷新后比对（跨域跳转即视为过期）
+                    pre_url = page.url
                     await page.reload(wait_until='domcontentloaded', timeout=15000)
-
-                # 刷新前记录 URL / host，用于刷新后比对（跨域跳转即视为过期）
-                pre_url = page.url
                 pre_host = _url_host(pre_url)
 
                 # finance-mng 为 SPA（sto-js-web），session 过期走客户端 JS 慢重定向，
                 # 固定 2s 往往读不到跳转，故对 finance 轮询最多 6s 捕获跳转。
-                if _is_finance_page(url):
+                # 用 pre_url（实际页面 URL）判断：wangdian-rebate 常驻页的 key 是
+                # wangdian.sto.cn，但 page.url 实际是 finance-mng.sto.cn/.../show.do。
+                if _is_finance_page(pre_url) or _is_finance_page(url):
                     poll_deadline = time.monotonic() + 6
                     while time.monotonic() < poll_deadline:
                         await page.wait_for_timeout(500)
@@ -1252,7 +1259,7 @@ class BackgroundWorker(threading.Thread):
             if need_login:
                 self._emit_status({'heartbeat': 'Session 过期'})
                 self._emit_log('同步前检测: Session 过期，开始登录', 'login')
-                login_ok = await self._do_login(context)
+                login_ok = await self._do_login(context, force=True)
                 if not login_ok:
                     self._emit_log('登录失败，本次同步中止', 'report')
                     self._emit_status({'sync': '登录失败，同步中止'})
@@ -1264,7 +1271,7 @@ class BackgroundWorker(threading.Thread):
             if not alive:
                 self._emit_status({'heartbeat': 'Session 过期'})
                 self._emit_log('reload 检测到 Session 过期，重新登录', 'heartbeat')
-                login_ok = await self._do_login(context)
+                login_ok = await self._do_login(context, force=True)
                 if not login_ok:
                     self._emit_log('登录失败，本次同步中止', 'report')
                     self._emit_status({'sync': '登录失败，同步中止'})
@@ -1289,7 +1296,7 @@ class BackgroundWorker(threading.Thread):
 
             self._emit_status({'heartbeat': 'Session 过期'})
             self._emit_log('心跳检测: Session 过期，开始重新登录', 'heartbeat')
-            login_ok = await self._do_login(context)
+            login_ok = await self._do_login(context, force=True)
             if not login_ok:
                 self._emit_log('心跳重登失败', 'heartbeat')
                 return False
