@@ -351,6 +351,8 @@ class BackgroundWorker(threading.Thread):
         # 同时关闭所有常驻页面，否则 _open_persistent_pages 会因页面对象仍存在
         # 而跳过重新打开，导致登录后 cookie 无法重新生成
         await self._close_all_persistent_pages()
+        # 清扫游离页签：历史多次重登/打开失败遗留的未登记页，运行久了会堆积几十个
+        await self._close_orphan_pages(context)
         for attempt in range(3):
             self._emit_log(f'开始登录... (第{attempt+1}次)', 'login')
             page = await context.new_page()
@@ -687,6 +689,7 @@ class BackgroundWorker(threading.Thread):
             self._emit_log(f'wangdian 搜索失败: {e}', log_category)
 
     async def _open_one_persistent_page(self, context, url: str, log_category: str = 'general') -> bool:
+        page = None
         try:
             page = await context.new_page()
             await page.goto(url, wait_until='domcontentloaded', timeout=15000)
@@ -744,6 +747,12 @@ class BackgroundWorker(threading.Thread):
             return True
         except Exception as e:
             self._emit_log(f'常驻页面打开失败: {url} -> {e}', log_category)
+            # 关闭已创建但未登记的页面（goto 超时等），避免页签泄漏
+            if page is not None and not page.is_closed():
+                try:
+                    await page.close()
+                except Exception:
+                    pass
             return False
 
     async def _ensure_persistent_pages(self, context, log_category: str = 'heartbeat'):
@@ -764,6 +773,29 @@ class BackgroundWorker(threading.Thread):
                         await page.close()
                 except Exception:
                     pass
+
+    async def _close_orphan_pages(self, context):
+        """关闭未被任何追踪器登记的游离页签（开新页异常/旧登录遗留等导致），防止页签堆积。
+        重登是天然重置点：此时探测页与常驻页都已关闭，仅 _login_page 由登录流程管理，
+        其余一律视为游离页清理。在 _do_login_locked 内 _close_all_persistent_pages 之后调用。"""
+        tracked = set()
+        for p in self._persistent_pages.values():
+            tracked.add(id(p))
+        for attr in ('_spf_probe_page', '_zc_page', '_login_page'):
+            p = getattr(self, attr, None)
+            if p is not None:
+                tracked.add(id(p))
+        closed = 0
+        for p in list(context.pages):
+            if id(p) in tracked or p.is_closed():
+                continue
+            try:
+                await p.close()
+                closed += 1
+            except Exception:
+                pass
+        if closed:
+            self._emit_log(f'已清理 {closed} 个游离页签', 'login')
 
     async def _open_persistent_pages(self, context):
         self._emit_log('开始打开常驻页面...', 'general')
@@ -863,17 +895,18 @@ class BackgroundWorker(threading.Thread):
 
             except Exception as e:
                 self._emit_log(f'常驻页面 reload 失败: {url} -> {e}', 'heartbeat')
+                # 先关闭本页（可能是 closed-branch 新建后 goto 失败的游离页），防止页签泄漏
+                try:
+                    if page is not None and not page.is_closed():
+                        await page.close()
+                except Exception:
+                    pass
                 # finance-fundmanage 需要通过 wangdian 搜索入口打开，不能直接 goto
                 if FINANCE_FUNDMANAGE_URL in url:
                     self._emit_log(f'finance-fundmanage 需要通过搜索入口重新打开', 'heartbeat')
                     await self._reopen_finance_fundmanage(context)
                 else:
-                    # 关闭旧页面，防止标签页泄漏
-                    try:
-                        if not page.is_closed():
-                            await page.close()
-                    except Exception:
-                        pass
+                    new_page = None
                     try:
                         new_page = await context.new_page()
                         await new_page.goto(url, wait_until='domcontentloaded', timeout=15000)
@@ -881,6 +914,12 @@ class BackgroundWorker(threading.Thread):
                         self._emit_log(f'常驻页面重新打开成功: {url}', 'heartbeat')
                     except Exception as e2:
                         self._emit_log(f'常驻页面重新打开也失败: {url} -> {e2}', 'heartbeat')
+                        # 关闭重新打开失败产生的游离页
+                        if new_page is not None and not new_page.is_closed():
+                            try:
+                                await new_page.close()
+                            except Exception:
+                                pass
 
         await self._maybe_run_wangdian_searches(context, log_category='heartbeat')
         return not session_expired
