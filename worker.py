@@ -140,6 +140,9 @@ class BackgroundWorker(threading.Thread):
         # 全局重登冷却断路器：连续失败后进入指数退避，避免反复 clear_cookies 拖垮主会话
         self._login_cooldown_until = 0.0
         self._login_fail_count = 0
+        # 网点管家会话就绪门闩：仅在首页搜索框确认可用后为 True；
+        # 探测协程在 False 时空转等待，不搜索、不触发重登
+        self._session_ready = False
 
         settings = _load_settings()
         # 从持久化恢复已知 spf_sid 值（用于跨重启检测值变化）
@@ -196,9 +199,12 @@ class BackgroundWorker(threading.Thread):
         self._emit_status({'login': '启动中...'})
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=False)
-
-            context = await browser.new_context()
+            # --start-maximized + no_viewport：避免默认 1280x720 视口裁切页面内容
+            browser = await p.chromium.launch(
+                headless=False,
+                args=['--start-maximized'],
+            )
+            context = await browser.new_context(no_viewport=True)
 
             # wangdian 首页搜索互斥锁：常驻页面搜索与 spf_sid 探测协程
             # 会同时操作 wangdian 首页搜索框，需串行避免冲突（Target crashed）
@@ -375,6 +381,7 @@ class BackgroundWorker(threading.Thread):
 
     async def _do_login_locked(self, context):
         self._emit_status({'login': '登录中...'})
+        self._set_session_ready(False, '开始全局重登')
         # 关闭探测 page，使其下轮重建（cookie 即将被清空，旧 page 会失效）
         await self._close_probe_pages()
         # 清空 context 中所有 cookie，避免 _check_session 等前置操作
@@ -390,6 +397,8 @@ class BackgroundWorker(threading.Thread):
             page = await context.new_page()
             try:
                 await login_via_dingtalk(page)
+                # 稳态确认：URL 正确 + 搜索框可见；失败可二次登录一次
+                await self._confirm_wangdian_ready(page, allow_relogin=True)
                 await self._replace_login_page(page)
                 now = datetime.now().strftime('%H:%M:%S')
                 self._emit_status({'login': f'已登录 ({now})', 'login_time': now})
@@ -397,6 +406,7 @@ class BackgroundWorker(threading.Thread):
                 # 登录成功，清除冷却计数，恢复正常节奏
                 self._login_fail_count = 0
                 self._login_cooldown_until = 0.0
+                self._set_session_ready(True, '登录稳态确认通过')
                 return True
             except Exception as e:
                 # 记录失败时的页面 URL 和关键 cookie，便于定位 403 循环根因
@@ -424,6 +434,7 @@ class BackgroundWorker(threading.Thread):
                     self._login_cooldown_until = time.time() + backoff
                     self._emit_log(f'登录连续失败 {self._login_fail_count} 次，进入冷却 {backoff}s，避免反复破坏现有会话', 'login')
                     self._write_login_diag(f'全局重登连续失败{self._login_fail_count}次，冷却{backoff}s: {e}')
+                    self._set_session_ready(False, '登录三连失败')
             finally:
                 if page is not self._login_page:
                     await page.close()
@@ -462,6 +473,42 @@ class BackgroundWorker(threading.Thread):
     def _in_login_cooldown(self) -> bool:
         """全局重登是否处于冷却期（连续失败后的指数退避窗口内）。"""
         return time.time() < self._login_cooldown_until
+
+    def _set_session_ready(self, ready: bool, reason: str = ''):
+        """设置网点管家会话就绪门闩；探测协程据此决定是否允许搜索/触发重登。"""
+        self._session_ready = ready
+        if reason:
+            self._emit_log(f'会话就绪={"是" if ready else "否"} ({reason})', 'login')
+
+    async def _confirm_wangdian_ready(self, page, *, allow_relogin: bool = True) -> None:
+        """确认已进入网点管家首页且搜索框可用。慢网最多等 25s；
+        若跳回认证页且 allow_relogin，再走一轮钉钉登录后重试一次。失败则抛异常。"""
+
+        async def _ensure_index_and_search():
+            if is_auth_url(page.url) or not is_logged_in_url(page.url):
+                await page.goto(WANGDIAN_INDEX_URL, wait_until='domcontentloaded', timeout=30000)
+                await page.wait_for_timeout(2000)
+            if is_auth_url(page.url):
+                raise RuntimeError(f'确认就绪时仍在认证页: {page.url}')
+            await self._dismiss_announcement(page, 'login')
+            deadline = time.monotonic() + 25
+            while time.monotonic() < deadline:
+                if await self._is_wangdian_search_ready(page):
+                    self._emit_log(f'网点管家首页搜索框已就绪: {page.url}', 'login')
+                    return
+                if is_auth_url(page.url):
+                    raise RuntimeError(f'确认就绪时跳回认证页: {page.url}')
+                await page.wait_for_timeout(1000)
+            raise RuntimeError(f'网点管家搜索框未在时限内就绪，当前 URL: {page.url}')
+
+        try:
+            await _ensure_index_and_search()
+        except Exception as first_err:
+            if not allow_relogin:
+                raise
+            self._emit_log(f'登录稳态确认失败，尝试二次登录: {first_err}', 'login')
+            await login_via_dingtalk(page)
+            await _ensure_index_and_search()
 
     def _write_login_diag(self, message: str):
         """把关键登录诊断同步落盘到 logs/login-diag.log，绕过 loguru sink，
@@ -611,8 +658,28 @@ class BackgroundWorker(threading.Thread):
         self._emit_log(f'执行 SSO 前置校验: {reason}', 'login')
         need_login = await self._check_session(context)
         if not need_login:
-            self._emit_status({'login': '已登录'})
-            self._emit_log('Session 有效，允许继续 Cookie 流程', 'login')
+            # Session URL 看起来有效，仍需确认首页搜索框可用，再打开探测门闩
+            page = await context.new_page()
+            try:
+                await page.goto(WANGDIAN_INDEX_URL, wait_until='domcontentloaded', timeout=30000)
+                await page.wait_for_timeout(2000)
+                await self._confirm_wangdian_ready(page, allow_relogin=True)
+                await self._replace_login_page(page)
+                self._emit_status({'login': '已登录'})
+                self._emit_log('Session 有效，允许继续 Cookie 流程', 'login')
+                self._set_session_ready(True, f'SSO 校验通过 ({reason})')
+                return True
+            except Exception as e:
+                self._emit_log(f'Session 表面有效但稳态确认失败，转入登录: {e}', 'login')
+                need_login = True
+            finally:
+                if page is not self._login_page:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+
+        if not need_login:
             return True
 
         self._emit_log('Session 无效或未登录，开始单点登录流程', 'login')
@@ -620,6 +687,7 @@ class BackgroundWorker(threading.Thread):
         if not login_ok:
             self._emit_status({'login': '登录失败', 'sync': '等待登录'})
             self._emit_log('单点登录未完成，禁止访问业务页和上报 Cookie', 'login')
+            self._set_session_ready(False, '启动/校验登录失败')
             return False
         return True
 
@@ -926,7 +994,7 @@ class BackgroundWorker(threading.Thread):
                     # 独立 session 页面（market-cod / front.sto.cn / finance-mng 等走各自 SSO，
                     # 其过期不代表 wangdian 主会话过期）→ 仅在该页就地重登，不置 session_expired、
                     # 不 break、不触发全局 clear_cookies，否则会把本可继续工作的主会话也拖垮。
-                    if self._is_independent_session_page(page.url) or self._is_independent_session_page(url):
+                    if _is_independent_session_page(page.url) or _is_independent_session_page(url):
                         self._emit_log(f'独立 session 页面需要重新登录: {url}', 'heartbeat')
                         try:
                             await self._do_sso_login_on_page(page)
@@ -1258,6 +1326,14 @@ class BackgroundWorker(threading.Thread):
                     self._emit_log('[spf_sid探测] 登录维护中，跳过本轮', 'report')
                     await asyncio.sleep(5)
                     continue
+                if not self._session_ready:
+                    # 每 30s 打一次，避免 5s 轮询刷屏
+                    now = time.time()
+                    if now - getattr(self, '_spf_wait_log_at', 0) >= 30:
+                        self._emit_log('[spf_sid探测] 等待网点管家登录就绪', 'report')
+                        self._spf_wait_log_at = now
+                    await asyncio.sleep(5)
+                    continue
 
                 search_ok = False
                 # 每轮开始确保探测页面可用（可能已被登录关闭 / 异常关闭或 crash）
@@ -1528,6 +1604,13 @@ class BackgroundWorker(threading.Thread):
                 continue
             if self._maintaining:
                 self._emit_log('[engineSid] 登录维护中，跳过本轮', 'zc')
+                await asyncio.sleep(5)
+                continue
+            if not self._session_ready:
+                now = time.time()
+                if now - getattr(self, '_zc_wait_log_at', 0) >= 30:
+                    self._emit_log('[engineSid] 等待网点管家登录就绪', 'zc')
+                    self._zc_wait_log_at = now
                 await asyncio.sleep(5)
                 continue
             try:
