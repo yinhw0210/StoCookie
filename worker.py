@@ -53,6 +53,28 @@ def _is_finance_page(url: str) -> bool:
     return 'finance-mng.sto.cn' in url or 'finance-fundmanage.sto.cn' in url
 
 
+# 全局重登是破坏性操作（clear_cookies 会清空主会话）。若钉钉未确认导致连续失败，
+# 必须指数退避冷却，否则会陷入「clear_cookies → 钉钉失败 → 再 clear_cookies」死亡循环。
+_LOGIN_COOLDOWN_BASE = 60       # 首次失败后冷却 60s
+_LOGIN_COOLDOWN_MAX = 30 * 60   # 指数退避上限 30 分钟
+
+
+def _is_independent_session_page(url: str) -> bool:
+    """判断是否为「独立 SSO 会话」页面：这类页面使用与 wangdian(WD_SESSION) 不同的
+    独立登录体系（front.sto.cn=sto-sso-web / finance-mng=sso.sto-express.cn /
+    market-cod=独立 SSO），其过期只代表该页面自身需要重登，并不代表 wangdian 主会话过期。
+    因此 reload 检测到它们跳 SSO 时，只做就地重登，不置 session_expired、不触发全局
+    clear_cookies，避免把仍可工作的主会话一起拖垮。"""
+    return any(
+        k in url for k in (
+            'market-cod.sto.cn',
+            'front.sto.cn',
+            'finance-mng.sto.cn',
+            'finance-fundmanage.sto.cn',
+        )
+    )
+
+
 COOKIE_REPORT_LABELS = {
     'SESSION=': 'SESSION (finance-mng)',
     'cod=': 'cod (market-cod)',
@@ -115,6 +137,9 @@ class BackgroundWorker(threading.Thread):
         self._pdd_task = None
         # PDD 最近一次上报是否成功，用于合并状态计数（替代无条件 +1）
         self._pdd_last_ok = None
+        # 全局重登冷却断路器：连续失败后进入指数退避，避免反复 clear_cookies 拖垮主会话
+        self._login_cooldown_until = 0.0
+        self._login_fail_count = 0
 
         settings = _load_settings()
         # 从持久化恢复已知 spf_sid 值（用于跨重启检测值变化）
@@ -217,7 +242,7 @@ class BackgroundWorker(threading.Thread):
 
                 if self._manual_login_event.is_set():
                     self._manual_login_event.clear()
-                    await self._do_login(context, force=True)
+                    await self._do_login(context, force=True, bypass_cooldown=True)
                     await self._open_persistent_pages(context)
                     # 手动登录后重置倒计时并触发一次采集，与手动同步行为一致
                     sync_start = time.time()
@@ -320,15 +345,22 @@ class BackgroundWorker(threading.Thread):
         finally:
             await page.close()
 
-    async def _do_login(self, context, *, force: bool = False):
+    async def _do_login(self, context, *, force: bool = False, bypass_cooldown: bool = False):
         """重新登录（带互斥锁 + 维护态协调）：主循环与探测协程可能并发触发登录，
         两个 _do_login 并发会互相 clear_cookies 导致登录全部失败，
         因此用锁保证任意时刻只有一个登录流程在执行。
         _maintaining 标志让探测协程在登录期间让路，避免用到被清空的 cookie / 被关的 page。
-        force=True 时绕过「已登录跳过」——用于 reload 已权威检测到某常驻页跳 SSO 的场景：
-        该页可能是与 wangdian(WD_SESSION) 不同的独立会话（如 front.sto.cn / finance-mng
-        走 sto-sso-web / sso.sto-express.cn），WD_SESSION 仍在不代表这些页面没过期，
-        必须强制重登 + clear_cookies + 重开全部常驻页，否则旧页面/旧 cookie 原地保留。"""
+
+        冷却机制：全局重登是破坏性操作（clear_cookies 会清空主会话），若钉钉未确认导致
+        连续失败，必须退避，否则会陷入「clear_cookies → 钉钉失败 → 再 clear_cookies」死亡循环，
+        把本可继续工作的 wangdian 会话也拖死。冷却期内返回 False，由调用方跳过本次重登。
+
+        bypass_cooldown=True 用于用户手动点击登录 / 启动校验等必须立即尝试的场景。"""
+        # 冷却期：避免钉钉未确认时反复 clear_cookies 破坏现有会话（死亡循环）
+        if not bypass_cooldown and self._in_login_cooldown():
+            remain = int(self._login_cooldown_until - time.time())
+            self._emit_log(f'登录冷却中（剩余 {remain}s），跳过本次重登，避免破坏现有会话', 'login')
+            return False
         async with self._login_lock:
             # 已登录跳过：若其它流程刚登录成功，不再 clear_cookies 破坏其成果。
             # 但 force 时不跳过（reload 已证伪「已登录」）。
@@ -362,6 +394,9 @@ class BackgroundWorker(threading.Thread):
                 now = datetime.now().strftime('%H:%M:%S')
                 self._emit_status({'login': f'已登录 ({now})', 'login_time': now})
                 self._emit_log('登录成功', 'login')
+                # 登录成功，清除冷却计数，恢复正常节奏
+                self._login_fail_count = 0
+                self._login_cooldown_until = 0.0
                 return True
             except Exception as e:
                 # 记录失败时的页面 URL 和关键 cookie，便于定位 403 循环根因
@@ -372,14 +407,23 @@ class BackgroundWorker(threading.Thread):
                     wd_names = sorted(c['name'] for c in cookies if c.get('domain', '').endswith('wangdian.sto.cn'))
                     self._emit_log(f'[登录失败诊断] sto 域 cookie: {sto_names}', 'login')
                     self._emit_log(f'[登录失败诊断] wangdian 域 cookie: {wd_names}', 'login')
+                    # 同步落盘到独立诊断文件，避免 loguru sink 异常时丢失
+                    self._write_login_diag(f'重登尝试失败 URL={page.url} sto={sto_names} wd={wd_names}')
                 except Exception as e2:
                     self._emit_log(f'[登录失败诊断] 采集诊断信息失败: {e2}', 'login')
+                    self._write_login_diag(f'重登失败且诊断采集异常: {e2}')
                 if attempt < 2:
                     self._emit_log(f'登录失败({attempt+1}/3)，30秒后重试: {e}', 'login')
                     await asyncio.sleep(30)
                 else:
                     self._emit_status({'login': f'登录失败 (已重试3次)'})
                     self._emit_log(f'登录失败，已重试3次: {e}', 'login')
+                    # 连续失败：进入指数退避冷却，避免反复 clear_cookies 拖垮主会话
+                    self._login_fail_count += 1
+                    backoff = min(_LOGIN_COOLDOWN_MAX, _LOGIN_COOLDOWN_BASE * (2 ** (self._login_fail_count - 1)))
+                    self._login_cooldown_until = time.time() + backoff
+                    self._emit_log(f'登录连续失败 {self._login_fail_count} 次，进入冷却 {backoff}s，避免反复破坏现有会话', 'login')
+                    self._write_login_diag(f'全局重登连续失败{self._login_fail_count}次，冷却{backoff}s: {e}')
             finally:
                 if page is not self._login_page:
                     await page.close()
@@ -414,6 +458,22 @@ class BackgroundWorker(threading.Thread):
             )
         except Exception:
             return False
+
+    def _in_login_cooldown(self) -> bool:
+        """全局重登是否处于冷却期（连续失败后的指数退避窗口内）。"""
+        return time.time() < self._login_cooldown_until
+
+    def _write_login_diag(self, message: str):
+        """把关键登录诊断同步落盘到 logs/login-diag.log，绕过 loguru sink，
+        确保即便 GUI 日志/文件日志异常，登录失败根因也能留存供事后排查。"""
+        try:
+            diag_path = os.path.join(LOG_DIR, 'login-diag.log')
+            ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            with open(diag_path, 'a', encoding='utf-8') as f:
+                f.write(f'[{ts}] {message}\n')
+                f.flush()
+        except Exception:
+            pass
 
     async def _close_probe_pages(self):
         """关闭探测 page（spf_sid / engineSid），登录后强制重建，
@@ -556,7 +616,7 @@ class BackgroundWorker(threading.Thread):
             return True
 
         self._emit_log('Session 无效或未登录，开始单点登录流程', 'login')
-        login_ok = await self._do_login(context, force=True)
+        login_ok = await self._do_login(context, force=True, bypass_cooldown=True)
         if not login_ok:
             self._emit_status({'login': '登录失败', 'sync': '等待登录'})
             self._emit_log('单点登录未完成，禁止访问业务页和上报 Cookie', 'login')
@@ -863,9 +923,10 @@ class BackgroundWorker(threading.Thread):
                     _url_host(post_url) != pre_host and not is_auth_url(pre_url)
                 )
                 if expired_now:
-                    # market-cod 有独立 session，跳转到 SSO 不代表全局过期
-                    # （page.sto.cn 实操中心已暂不启用）
-                    if 'market-cod.sto.cn' in url:
+                    # 独立 session 页面（market-cod / front.sto.cn / finance-mng 等走各自 SSO，
+                    # 其过期不代表 wangdian 主会话过期）→ 仅在该页就地重登，不置 session_expired、
+                    # 不 break、不触发全局 clear_cookies，否则会把本可继续工作的主会话也拖垮。
+                    if self._is_independent_session_page(page.url) or self._is_independent_session_page(url):
                         self._emit_log(f'独立 session 页面需要重新登录: {url}', 'heartbeat')
                         try:
                             await self._do_sso_login_on_page(page)
@@ -873,6 +934,7 @@ class BackgroundWorker(threading.Thread):
                             if url not in page.url:
                                 await page.goto(url, wait_until='domcontentloaded', timeout=15000)
                                 await page.wait_for_timeout(2000)
+                            # market-cod 登录后跳转到 /cod/home/index，需要再次导航到目标页
                             if 'market-cod.sto.cn' in url and 'topayment/siteOrder/list' not in page.url:
                                 await page.goto(url, wait_until='domcontentloaded', timeout=15000)
                                 await page.wait_for_timeout(2000)
@@ -882,6 +944,7 @@ class BackgroundWorker(threading.Thread):
                             self._emit_log(f'独立 session 页面重新登录完成: {url}', 'heartbeat')
                         except Exception as e:
                             self._emit_log(f'独立 session 页面登录失败: {url} -> {e}', 'heartbeat')
+                        # 注意：独立 session 过期不影响全局 wangdian 会话，继续检查其余页面
                     else:
                         self._emit_log(f'常驻页面 reload 后跳转到登录页: {url} → {page.url}', 'heartbeat')
                         # 关闭停留在认证页的旧页面，以便 _open_persistent_pages 能重新打开

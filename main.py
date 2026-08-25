@@ -27,6 +27,9 @@ def main():
         os.path.join(LOG_DIR, 'stocookie-{time:YYYY-MM-DD}.log'),
         rotation='00:00', retention='30 days', level='DEBUG',
         diagnose=False, backtrace=False,
+        # enqueue=True 让日志在后台线程异步写入，单条记录异常不会拖垮整个 sink 导致后续日志断流；
+        # encoding 显式指定 utf-8，避免某些平台默认编码导致写入失败。
+        enqueue=True, encoding='utf-8',
     )
 
     app = QApplication(sys.argv)
