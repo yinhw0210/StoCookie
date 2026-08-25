@@ -4,6 +4,7 @@ from loguru import logger
 
 from config import (
     LOGIN_ENTRY_URL,
+    ROLE_ACTIVE_CLASS,
     ROLE_ENTRY_BUTTON_SELECTOR,
     ROLE_ITEM_SELECTOR,
     ROLE_PAGE_SELECTOR,
@@ -11,6 +12,7 @@ from config import (
     SSO_URL,
     WANGDIAN_INDEX_URL,
     is_logged_in_url,
+    preferred_role_org,
 )
 from desktop_automation import click_dingtalk_confirm
 
@@ -167,8 +169,58 @@ async def _do_dingtalk_login_flow(page: Page) -> None:
         await _finish_confirm_task(confirm_task)
 
 
+async def _list_visible_orgs(page: Page) -> list[str]:
+    """收集选择工号页上可见的所属组织文案，便于失败诊断。"""
+    items = page.locator(ROLE_ITEM_SELECTOR)
+    orgs: list[str] = []
+    try:
+        count = await items.count()
+        for i in range(count):
+            text = (await items.nth(i).inner_text(timeout=2000) or '').strip()
+            for line in text.splitlines():
+                line = line.strip()
+                if line.startswith('所属组织:'):
+                    orgs.append(line.replace('所属组织:', '').strip())
+                    break
+    except Exception:
+        pass
+    return orgs
+
+
+async def _click_role_item_by_org(page: Page, org: str) -> None:
+    """按所属组织点击工号项，并校验出现选中态；失败抛错。"""
+    items = page.locator(ROLE_ITEM_SELECTOR)
+    await items.first.wait_for(state='visible', timeout=8000)
+    count = await items.count()
+    target = None
+    for i in range(count):
+        item = items.nth(i)
+        text = await item.inner_text(timeout=3000)
+        # HTML 里常有「所属组织: 山东临沂公司  」尾部空格，做归一化匹配
+        normalized = ' '.join(text.replace('\u00a0', ' ').split())
+        if f'所属组织: {org}' in normalized:
+            target = item
+            break
+    if target is None:
+        visible = await _list_visible_orgs(page)
+        raise RuntimeError(f'未找到所属组织「{org}」的工号项，页面可见组织: {visible}')
+
+    for attempt in range(2):
+        await target.click()
+        await page.wait_for_timeout(500)
+        cls = (await target.get_attribute('class')) or ''
+        if ROLE_ACTIVE_CLASS in cls:
+            logger.info(f'已按所属组织选择: {org} (选中态已确认)')
+            return
+        logger.warning(f'所属组织「{org}」点击后未出现选中态，重试 ({attempt + 1}/2)')
+        await page.wait_for_timeout(500)
+
+    cls = (await target.get_attribute('class')) or ''
+    raise RuntimeError(f'所属组织「{org}」未能选中 (class={cls!r})')
+
+
 async def _select_first_role_and_enter(page: Page) -> bool:
-    """检测角色选择页，点击「进入系统」（默认选中第一个）。
+    """检测角色/工号选择页，按站点绑定的所属组织选中后再点「进入系统」。
     返回 True 表示检测到角色页并已点击；无角色页返回 False。
     注意：不等待特定 URL，由调用方决定后续等待逻辑（适用于 wangdian 及其他页面）。"""
     role_page = page.locator(ROLE_PAGE_SELECTOR)
@@ -189,35 +241,21 @@ async def _select_first_role_and_enter(page: Page) -> bool:
     if not has_role_page and not has_role_item:
         return False
 
-    # 角色选择页默认已选中第一个角色，直接点「进入系统」；
-    # 若默认未选中导致失败，再回退点击第一个角色项
+    org = preferred_role_org(page.url)
+    logger.info(f'检测到选择工号页，目标所属组织: {org} (url={page.url})')
+    await _click_role_item_by_org(page, org)
+
     entry_button = page.locator(ROLE_ENTRY_BUTTON_SELECTOR)
-    try:
-        if await entry_button.first.is_visible(timeout=3000):
-            await entry_button.first.click()
-            logger.info('已点击「进入系统」')
-            return True
-    except Exception:
-        pass
-
-    try:
-        await role_items.first.wait_for(state='visible', timeout=5000)
-    except Exception:
-        raise RuntimeError('检测到角色选择页，但未找到可选角色')
-
-    await role_items.first.click()
-    logger.info('已选择第一个关联工号')
-
     if not await entry_button.first.is_visible(timeout=5000):
         raise RuntimeError('未找到「进入系统」按钮')
 
     await entry_button.first.click()
-    logger.info('已点击「进入系统」')
+    logger.info(f'已点击「进入系统」(所属组织={org})')
     return True
 
 
 async def select_first_role_if_present(page: Page) -> bool:
-    """如果出现多角色选择页，选择第一个角色并点击进入系统（等待进入 wangdian）。"""
+    """如果出现多角色选择页，按所属组织选择并点击进入系统（等待进入 wangdian）。"""
     handled = await _select_first_role_and_enter(page)
     if not handled:
         return False

@@ -90,7 +90,30 @@ WANGDIAN_INDEX_URL = 'https://wangdian.sto.cn/index'
 ROLE_PAGE_SELECTOR = '.accountCorrelation_main_window'
 ROLE_ITEM_SELECTOR = '.next-list-item[class*="list_wrap_item"]'
 ROLE_ENTRY_BUTTON_SELECTOR = '.entrybtn'
+ROLE_ACTIVE_CLASS = 'list_wrap_item_active'
 SAFETY_QUICK_LOGIN_SELECTOR = 'button.ant-btn-primary:has-text("快速登录")'
+
+# 选择工号页：按「所属组织」匹配。key 为 URL host 片段，命中则用对应组织；
+# 未命中用 default。当前全部站点选山东临沂公司；以后可按站点改成集散中心等。
+ROLE_ORG_BY_SITE = {
+    'default': '山东临沂公司',
+    # 'front.sto.cn': '山东临沂集散中心',
+    # 'market-cod.sto.cn': '山东临沂集散中心',
+}
+
+
+def preferred_role_org(url: str) -> str:
+    """根据当前页面 URL 解析应选择的所属组织。"""
+    default = ROLE_ORG_BY_SITE.get('default', '山东临沂公司')
+    if not url:
+        return default
+    for key, org in ROLE_ORG_BY_SITE.items():
+        if key == 'default':
+            continue
+        if key in url:
+            return org
+    return default
+
 
 AUTH_URL_MARKERS = (
     'sto-sso-web',
