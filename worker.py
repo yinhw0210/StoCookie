@@ -13,6 +13,8 @@ from config import (
     COLLECT_INTERVAL_MINUTES,
     FINANCE_FUNDMANAGE_URL,
     HEARTBEAT_INTERVAL_MINUTES,
+    KUNLUN_HEARTBEAT_MINUTES,
+    KUNLUN_STATUS_LABEL,
     LOG_DIR,
     PERSISTENT_PAGES,
     SETTINGS_PATH,
@@ -122,6 +124,7 @@ class BackgroundWorker(threading.Thread):
         self._response_listener_registered = False
         self._persistent_pages: dict[str, object] = {}
         self._pdd = None
+        self._kunlun = None
         self._known_spf_sid_values: set[str] = set()
         self._wangdian_search_lock = None
         self._login_lock = None
@@ -135,8 +138,10 @@ class BackgroundWorker(threading.Thread):
         self._spf_probe_task = None
         self._engine_sid_task = None
         self._pdd_task = None
-        # PDD 最近一次上报是否成功，用于合并状态计数（替代无条件 +1）
+        self._kunlun_task = None
+        # PDD / 昆仑最近一次上报是否成功，用于合并状态计数（替代无条件 +1）
         self._pdd_last_ok = None
+        self._kunlun_last_ok = None
         # 全局重登冷却断路器：连续失败后进入指数退避，避免反复 clear_cookies 拖垮主会话
         self._login_cooldown_until = 0.0
         self._login_fail_count = 0
@@ -156,6 +161,9 @@ class BackgroundWorker(threading.Thread):
         self._cookie_obtained_at: dict[str, tuple[str, float]] = {}
         self._zc_enabled = settings.get('zc_enabled', True)
         self._zc_interval = settings.get('zc_interval', ZC_ENGINE_SID_INTERVAL_MINUTES)
+        self._kunlun_heartbeat_interval = settings.get(
+            'kunlun_heartbeat_interval', KUNLUN_HEARTBEAT_MINUTES
+        )
 
     @property
     def collect_interval(self):
@@ -228,6 +236,9 @@ class BackgroundWorker(threading.Thread):
             # PDD 站点初始化
             await self._init_pdd(browser)
 
+            # 昆仑站点初始化（独立 context，与 PDD 同模式）
+            await self._init_kunlun(browser)
+
             last_sync = time.time()
             last_heartbeat = time.time()
 
@@ -239,6 +250,9 @@ class BackgroundWorker(threading.Thread):
 
             # 启动 PDD 独立协程（独立时间线，不再阻塞主循环 5s tick）
             self._pdd_task = asyncio.create_task(self._probe_pdd_loop())
+
+            # 启动昆仑独立协程（心跳 30min / 上报对齐 collect_interval）
+            self._kunlun_task = asyncio.create_task(self._probe_kunlun_loop())
 
             while not self._stop_event.is_set():
                 if self._paused:
@@ -1203,26 +1217,31 @@ class BackgroundWorker(threading.Thread):
             if total_missing > 0:
                 summary_parts.append(f'未采集{total_missing}')
 
-            # 暂存 STO 部分的统计数据，等 PDD 上报完成后合并输出
+            # 暂存 STO 部分的统计数据，等 PDD/昆仑上报完成后合并输出
             self._sto_summary = (total_success, total_partial, total_fail, total_missing, now_str)
             self._emit_log(f'=== 上报完成: {"/".join(summary_parts)} ===', 'report')
-            # 如果没有 PDD，直接输出合并状态；否则等 PDD 完成后由 _do_pdd_collect_and_report 调用
-            if not self._pdd:
+            # 如果没有 PDD/昆仑，直接输出合并状态；否则等独立站点上报完成后调用
+            if not self._pdd and not self._kunlun:
                 self._emit_combined_sync_status()
         except Exception as e:
             self._emit_status({'sync': f'上报失败: {e}'})
             self._emit_log(f'采集上报异常: {e}', 'report')
 
     def _emit_combined_sync_status(self):
-        """合并 STO + PDD 的上报统计，输出统一的 sync 状态。"""
+        """合并 STO + PDD + 昆仑的上报统计，输出统一的 sync 状态。"""
         if not hasattr(self, '_sto_summary') or self._sto_summary is None:
             return
         total_success, total_partial, total_fail, total_missing, now_str = self._sto_summary
-        # 加上 PDD 的计数（按最近一次真实上报结果，不再无条件计成功）
+        # 加上 PDD / 昆仑的计数（按最近一次真实上报结果，不再无条件计成功）
         if self._pdd:
             if self._pdd_last_ok:
                 total_success += 1
             elif self._pdd_last_ok is False:
+                total_fail += 1
+        if self._kunlun:
+            if self._kunlun_last_ok:
+                total_success += 1
+            elif self._kunlun_last_ok is False:
                 total_fail += 1
         summary_parts = [f'成功{total_success}']
         if total_partial > 0:
@@ -1739,10 +1758,155 @@ class BackgroundWorker(threading.Thread):
                 waited += 5
         self._emit_log('PDD: 独立协程退出', 'pdd')
 
+    # ========== 昆仑站点方法 ==========
+
+    async def _init_kunlun(self, browser):
+        """初始化昆仑站点（独立 context，钉钉 SSO）"""
+        settings = _load_settings()
+        kunlun_enabled = settings.get('kunlun_enabled', True)
+        self._kunlun_heartbeat_interval = settings.get(
+            'kunlun_heartbeat_interval', KUNLUN_HEARTBEAT_MINUTES
+        )
+
+        if not kunlun_enabled:
+            self._emit_log('昆仑: 未启用，跳过', 'kunlun')
+            self._kunlun = None
+            return
+
+        from sites.kunlun import KunlunSiteDriver
+        self._kunlun = KunlunSiteDriver(emit_log=self._emit_log)
+        await self._kunlun.create_context(browser)
+
+        session_ok = await self._kunlun.check_session()
+        if not session_ok:
+            login_ok = await self._kunlun.login()
+            if not login_ok:
+                self._emit_log('昆仑: 启动登录失败，后续定时重试', 'kunlun')
+                return
+
+        self._emit_log('昆仑: 初始化完成，执行首次采集上报', 'kunlun')
+        await self._do_kunlun_sync_cycle()
+
+    async def _do_kunlun_sync_cycle(self):
+        """昆仑采集-上报：校验 session → menu 开扫描查询 → 读 __stoToken → 上报。"""
+        if not self._kunlun:
+            return
+        try:
+            self._emit_log('昆仑: === 同步周期开始 ===', 'kunlun')
+            session_ok = await self._kunlun.check_session()
+            if not session_ok:
+                self._emit_log('昆仑: Session 过期，重新登录', 'kunlun')
+                if not await self._kunlun.login():
+                    self._emit_log('昆仑: 登录失败，本次同步跳过', 'kunlun')
+                    self._emit_status({
+                        'kunlun_status': {
+                            KUNLUN_STATUS_LABEL: {
+                                'ok': False,
+                                'error': '登录失败',
+                                'time': datetime.now().strftime('%H:%M:%S'),
+                            }
+                        }
+                    })
+                    return
+
+            now_str = datetime.now().strftime('%H:%M:%S')
+            payloads = await self._kunlun.collect()
+            if not payloads:
+                self._kunlun_last_ok = False
+                self._emit_status({
+                    'kunlun_status': {
+                        KUNLUN_STATUS_LABEL: {'ok': False, 'error': '未采集到', 'time': now_str}
+                    }
+                })
+                self._emit_combined_sync_status()
+                return
+
+            account_name = await self._get_account_name()
+            extra_params = {'isScript': '1', 'accountName': account_name}
+            reports = await report_cookies(
+                payloads, emit_log=self._emit_log, log_category='kunlun', extra_params=extra_params
+            )
+            info = {'ok': False, 'error': '无上报结果', 'time': now_str}
+            for entry in reports:
+                info = self._build_report_status_info(entry['results'], now_str)
+                if info['ok']:
+                    self._emit_log(f'昆仑: ✓ {KUNLUN_STATUS_LABEL} 上报成功', 'kunlun')
+                elif info.get('partial'):
+                    self._emit_log(
+                        f'昆仑: ⚠ {KUNLUN_STATUS_LABEL} 部分上报成功 → {info.get("error", "")}',
+                        'kunlun',
+                    )
+                else:
+                    self._emit_log(
+                        f'昆仑: ✗ {KUNLUN_STATUS_LABEL} 上报失败 → {info.get("error", "")}',
+                        'kunlun',
+                    )
+                self._emit_status({'kunlun_status': {KUNLUN_STATUS_LABEL: info}})
+            self._kunlun_last_ok = info.get('ok', False) if reports else False
+            self._emit_combined_sync_status()
+            self._emit_log('昆仑: === 同步周期结束 ===', 'kunlun')
+        except Exception as e:
+            self._emit_log(f'昆仑: 同步异常: {e}', 'kunlun')
+
+    async def _do_kunlun_heartbeat(self):
+        """昆仑心跳：校验/保活，必要时重登；不上报。"""
+        if not self._kunlun:
+            return
+        try:
+            self._emit_log('昆仑: === 心跳开始 ===', 'kunlun')
+            ok = await self._kunlun.keep_alive()
+            if ok:
+                self._emit_log('昆仑: 心跳保活成功', 'kunlun')
+            else:
+                self._emit_log('昆仑: 心跳保活失败（登录未成功）', 'kunlun')
+            self._emit_log('昆仑: === 心跳结束 ===', 'kunlun')
+        except Exception as e:
+            self._emit_log(f'昆仑: 心跳异常: {e}', 'kunlun')
+
+    async def _probe_kunlun_loop(self):
+        """昆仑独立协程：心跳间隔与采集间隔双计时（类似主循环 sync/heartbeat 分离）。
+        启动 stagger ~20s；暂停期间让路。"""
+        if not self._kunlun:
+            return
+        self._emit_log(
+            f'昆仑: 独立协程启动 (心跳={self._kunlun_heartbeat_interval}min, '
+            f'上报={self._collect_interval}min)',
+            'kunlun',
+        )
+        await asyncio.sleep(20)
+        last_sync = time.time()
+        last_heartbeat = time.time()
+        while not self._stop_event.is_set():
+            if self._paused:
+                await asyncio.sleep(5)
+                continue
+            now = time.time()
+            sync_due = (now - last_sync) >= max(1, self._collect_interval) * 60
+            heartbeat_due = (now - last_heartbeat) >= max(1, self._kunlun_heartbeat_interval) * 60
+            try:
+                if sync_due:
+                    await self._do_kunlun_sync_cycle()
+                    last_sync = time.time()
+                    last_heartbeat = last_sync
+                elif heartbeat_due:
+                    await self._do_kunlun_heartbeat()
+                    last_heartbeat = time.time()
+            except Exception as e:
+                self._emit_log(f'昆仑: 协程周期异常: {e}', 'kunlun')
+            await asyncio.sleep(5)
+        self._emit_log('昆仑: 独立协程退出', 'kunlun')
+
     async def _await_probe_tasks(self):
         """主循环退出后，cancel 并等待所有探测协程结束，再让 browser.close() 执行，
         避免协程仍持有 page 引用导致脏退出。"""
-        tasks = [t for t in (self._spf_probe_task, self._engine_sid_task, self._pdd_task) if t]
+        tasks = [
+            t for t in (
+                self._spf_probe_task,
+                self._engine_sid_task,
+                self._pdd_task,
+                self._kunlun_task,
+            ) if t
+        ]
         for t in tasks:
             if not t.done():
                 t.cancel()
@@ -1775,6 +1939,14 @@ class BackgroundWorker(threading.Thread):
         self._zc_enabled = enabled
         self._zc_interval = interval_min
         self._emit_log(f'engineSid 设置已更新: 启用={enabled}, 刷新间隔={interval_min}分钟', 'general')
+
+    def update_kunlun_settings(self, enabled: bool, heartbeat_min: int):
+        # enabled 需重启生效（context 在启动时创建）；心跳间隔即时生效
+        self._kunlun_heartbeat_interval = heartbeat_min
+        self._emit_log(
+            f'昆仑设置已更新: 启用={enabled}(重启生效), 心跳间隔={heartbeat_min}分钟',
+            'general',
+        )
 
     def stop(self):
         self._stop_event.set()

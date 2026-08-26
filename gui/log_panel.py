@@ -38,7 +38,7 @@ def _classify(msg: str) -> str:
 
 def _is_key(msg: str, category: str) -> bool:
     """是否为「关键日志」：客户经营分析(zc)全部保留，或消息命中关键 cookie 关键词。"""
-    if category == 'zc':
+    if category == 'zc' or category == 'kunlun':
         return True
     low = msg.lower()
     return any(k in low for k in _KEY_KW)

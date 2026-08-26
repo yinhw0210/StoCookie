@@ -19,7 +19,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self._worker = worker
         self.setWindowTitle('设置')
-        self.setFixedSize(480, 640)
+        self.setFixedSize(480, 760)
         self.setStyleSheet(DARK_THEME)
         self._build_ui(current_collect, current_heartbeat)
 
@@ -107,6 +107,32 @@ class SettingsDialog(QDialog):
         # 分隔线
         self._add_separator(layout)
 
+        # 昆仑 kunlun_stotoken 配置
+        kunlun_label = QLabel('昆仑扫描查询 (kunlun_stotoken)')
+        kunlun_label.setStyleSheet('color: #e6e7ea; font-size: 13px; font-weight: 600;')
+        layout.addWidget(kunlun_label)
+
+        self._chk_kunlun_enabled = QCheckBox('启用昆仑采集')
+        self._chk_kunlun_enabled.setChecked(settings.get('kunlun_enabled', True))
+        layout.addWidget(self._chk_kunlun_enabled)
+
+        kunlun_form = QFormLayout()
+        kunlun_form.setSpacing(8)
+        self._spin_kunlun_heartbeat = QSpinBox()
+        self._spin_kunlun_heartbeat.setRange(1, 1440)
+        self._spin_kunlun_heartbeat.setValue(settings.get('kunlun_heartbeat_interval', 30))
+        self._spin_kunlun_heartbeat.setSuffix(' 分钟')
+        kunlun_form.addRow('昆仑心跳间隔:', self._spin_kunlun_heartbeat)
+        layout.addLayout(kunlun_form)
+
+        kunlun_hint = QLabel('独立 Context + 钉钉 SSO；启用开关需重启生效，心跳间隔即时生效；上报对齐采集间隔')
+        kunlun_hint.setStyleSheet('color: #686d76; font-size: 11px;')
+        kunlun_hint.setWordWrap(True)
+        layout.addWidget(kunlun_hint)
+
+        # 分隔线
+        self._add_separator(layout)
+
         # 导出日志
         export_layout = QHBoxLayout()
         btn_export = QPushButton('导出日志')
@@ -156,12 +182,17 @@ class SettingsDialog(QDialog):
         settings['pdd_password'] = self._edit_pdd_password.text()
         settings['zc_enabled'] = self._chk_zc_enabled.isChecked()
         settings['zc_interval'] = self._spin_zc_interval.value()
+        settings['kunlun_enabled'] = self._chk_kunlun_enabled.isChecked()
+        settings['kunlun_heartbeat_interval'] = self._spin_kunlun_heartbeat.value()
 
         with open(SETTINGS_PATH, 'w') as f:
             json.dump(settings, f, ensure_ascii=False, indent=4)
 
         self._worker.update_intervals(collect, heartbeat)
         self._worker.update_zc_settings(settings['zc_enabled'], settings['zc_interval'])
+        self._worker.update_kunlun_settings(
+            settings['kunlun_enabled'], settings['kunlun_heartbeat_interval']
+        )
         self.accept()
 
     def _export_logs(self):

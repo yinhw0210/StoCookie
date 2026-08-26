@@ -28,6 +28,7 @@ from gui.log_panel import LogPanel
 from gui.trend_widget import TrendWidget
 from cookie_collector import EXPECTED_REPORT_ITEMS
 from worker import ZC_STATUS_LABEL
+from config import KUNLUN_STATUS_LABEL
 
 
 class MainWindow(QMainWindow):
@@ -46,8 +47,8 @@ class MainWindow(QMainWindow):
         self._last_sync_time = ''
 
         self.setWindowTitle('StoCookie · 申通网点登录态代理')
-        self.setMinimumSize(1000, 720)
-        self.resize(1120, 820)
+        self.setMinimumSize(1180, 760)
+        self.resize(1320, 880)
         self.setStyleSheet(DARK_THEME)
 
         self._build_ui()
@@ -148,7 +149,7 @@ class MainWindow(QMainWindow):
         grid.setSpacing(6)
         self._report_rows = {}
         labels = [it['label'] for it in EXPECTED_REPORT_ITEMS]
-        labels += ['SUB_PASS_ID (PDD)', ZC_STATUS_LABEL]
+        labels += ['SUB_PASS_ID (PDD)', ZC_STATUS_LABEL, KUNLUN_STATUS_LABEL]
         for idx, lbl in enumerate(labels):
             row = ReportRow(lbl)
             self._report_rows[lbl] = row
@@ -281,6 +282,12 @@ class MainWindow(QMainWindow):
 
         if 'zc_status' in data:
             for label, info in data['zc_status'].items():
+                r = self._report_rows.get(label)
+                if r:
+                    r.set_status(**self._row_kwargs(info))
+
+        if 'kunlun_status' in data:
+            for label, info in data['kunlun_status'].items():
                 r = self._report_rows.get(label)
                 if r:
                     r.set_status(**self._row_kwargs(info))

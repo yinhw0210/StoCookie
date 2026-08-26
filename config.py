@@ -97,6 +97,7 @@ SAFETY_QUICK_LOGIN_SELECTOR = 'button.ant-btn-primary:has-text("快速登录")'
 # 未命中用 default。当前全部站点选山东临沂公司；以后可按站点改成集散中心等。
 ROLE_ORG_BY_SITE = {
     'default': '山东临沂公司',
+    'kunlun.sto.cn': '山东临沂集散中心',
     # 'front.sto.cn': '山东临沂集散中心',
     # 'market-cod.sto.cn': '山东临沂集散中心',
 }
@@ -151,3 +152,17 @@ ZC_ORIGIN = 'zc.sto.cn'                    # 用于在 frames 中定位 zc.sto.c
 ZC_SESSION_STORAGE_KEY = 'engineSid'       # sessionStorage 中的 key（驼峰）
 ZC_REPORT_KEY = 'enginesid'                # 上报到后端的 key（小写，对应 CookieKeyEnum.ENGINESID.code）
 ZC_ENGINE_SID_INTERVAL_MINUTES = 30        # 默认刷新/上报间隔（分钟），可在 GUI 设置中修改
+
+# 昆仑扫描查询（独立 BrowserContext，同 PDD）
+KUNLUN_URL = 'https://kunlun.sto.cn/device/scanQuery'
+KUNLUN_STORAGE_PATH = os.path.join(STORAGE_DIR, 'kunlun_state.json')
+KUNLUN_REPORT_KEY = 'kunlun_stotoken'           # 对应 CookieKeyEnum.KUNLUN_STOTOKEN.code
+KUNLUN_SESSION_STORAGE_KEY = '__stoToken'       # sessionStorage key
+KUNLUN_HEARTBEAT_MINUTES = 30                   # 心跳保活间隔（分钟），可在 GUI 覆盖
+KUNLUN_ORG = '山东临沂集散中心'                   # 选择工号页强制组织
+KUNLUN_SEARCH_KEYWORD = '扫描查询'
+KUNLUN_SEARCH_BTN_SELECTOR = 'button:has(.sto-shell-toolbar-item-text:has-text("搜索"))'
+KUNLUN_SEARCH_INPUT_SELECTOR = '#search-bar-wrapper input.input'
+KUNLUN_SEARCH_RESULT_SELECTOR = '.search-result-item-wrapper, .menu-search-result-item-wrapper'
+KUNLUN_SCAN_PANEL_SELECTOR = 'div[data-title="扫描查询"][id="/device/scanQuery"], div[id="/device/scanQuery"]'
+KUNLUN_STATUS_LABEL = 'kunlun_stotoken (昆仑)'
