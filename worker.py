@@ -421,6 +421,9 @@ class BackgroundWorker(threading.Thread):
                 self._login_fail_count = 0
                 self._login_cooldown_until = 0.0
                 self._set_session_ready(True, '登录稳态确认通过')
+                # 网点管家换号/重登后，昆仑独立 context 仍可能挂着旧账号 storage，
+                # 必须失效并重登，否则页面头像与 token 会继续是上一号。
+                await self._reset_kunlun_for_account_change('网点管家全局重登')
                 return True
             except Exception as e:
                 # 记录失败时的页面 URL 和关键 cookie，便于定位 403 循环根因
@@ -1760,6 +1763,44 @@ class BackgroundWorker(threading.Thread):
 
     # ========== 昆仑站点方法 ==========
 
+    def _get_kunlun_bound_account(self) -> str:
+        return str(_load_settings().get('kunlun_bound_account', '') or '')
+
+    def _set_kunlun_bound_account(self, account_name: str) -> None:
+        settings = _load_settings()
+        settings['kunlun_bound_account'] = account_name or ''
+        try:
+            with open(SETTINGS_PATH, 'w') as f:
+                json.dump(settings, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            self._emit_log(f'昆仑: 写入绑定账号失败: {e}', 'kunlun')
+
+    async def _reset_kunlun_for_account_change(self, reason: str) -> None:
+        """网点管家换号后：清空昆仑独立 session 并立即重登。"""
+        from config import KUNLUN_STORAGE_PATH
+
+        if not self._kunlun:
+            # 尚未 init：清掉落盘，避免下次 restore 旧号
+            try:
+                if os.path.exists(KUNLUN_STORAGE_PATH):
+                    os.remove(KUNLUN_STORAGE_PATH)
+                    self._emit_log(f'昆仑: 预清理落盘状态 ({reason})', 'kunlun')
+            except Exception as e:
+                self._emit_log(f'昆仑: 预清理落盘失败: {e}', 'kunlun')
+            self._set_kunlun_bound_account('')
+            return
+        try:
+            await self._kunlun.invalidate_session(reason)
+            if await self._kunlun.login():
+                account_name = await self._get_account_name()
+                self._set_kunlun_bound_account(account_name)
+                self._emit_log(f'昆仑: 换号后重登成功，绑定账号={account_name or "(空)"}', 'kunlun')
+            else:
+                self._emit_log('昆仑: 换号后重登失败，后续定时重试', 'kunlun')
+                self._set_kunlun_bound_account('')
+        except Exception as e:
+            self._emit_log(f'昆仑: 换号重置异常: {e}', 'kunlun')
+
     async def _init_kunlun(self, browser):
         """初始化昆仑站点（独立 context，钉钉 SSO）"""
         settings = _load_settings()
@@ -1774,15 +1815,46 @@ class BackgroundWorker(threading.Thread):
             return
 
         from sites.kunlun import KunlunSiteDriver
-        self._kunlun = KunlunSiteDriver(emit_log=self._emit_log)
-        await self._kunlun.create_context(browser)
+        from config import KUNLUN_STORAGE_PATH
 
-        session_ok = await self._kunlun.check_session()
+        self._kunlun = KunlunSiteDriver(emit_log=self._emit_log)
+
+        account_name = await self._get_account_name()
+        bound = self._get_kunlun_bound_account()
+        account_mismatch = bool(account_name and bound and account_name != bound)
+        if account_mismatch:
+            self._emit_log(
+                f'昆仑: 绑定账号「{bound}」与当前网点管家「{account_name}」不一致，丢弃旧 Session',
+                'kunlun',
+            )
+            try:
+                if os.path.exists(KUNLUN_STORAGE_PATH):
+                    os.remove(KUNLUN_STORAGE_PATH)
+            except Exception as e:
+                self._emit_log(f'昆仑: 删除旧 Session 失败: {e}', 'kunlun')
+
+        await self._kunlun.create_context(browser, restore=not account_mismatch)
+
+        session_ok = False if account_mismatch else await self._kunlun.check_session()
+        if session_ok and account_name:
+            # 绑定字段为空时（升级首跑），用壳上头像名再对一次，避免 restore 旧号
+            displayed = await self._kunlun.read_displayed_account()
+            if displayed and displayed != account_name and account_name not in displayed and displayed not in account_name:
+                self._emit_log(
+                    f'昆仑: 页面账号「{displayed}」与网点管家「{account_name}」不一致，强制重登',
+                    'kunlun',
+                )
+                await self._kunlun.invalidate_session('头像账号不一致')
+                session_ok = False
+
         if not session_ok:
             login_ok = await self._kunlun.login()
             if not login_ok:
                 self._emit_log('昆仑: 启动登录失败，后续定时重试', 'kunlun')
                 return
+
+        if account_name:
+            self._set_kunlun_bound_account(account_name)
 
         self._emit_log('昆仑: 初始化完成，执行首次采集上报', 'kunlun')
         await self._do_kunlun_sync_cycle()
@@ -1810,6 +1882,29 @@ class BackgroundWorker(threading.Thread):
                     return
 
             now_str = datetime.now().strftime('%H:%M:%S')
+            # 采集前再对一次账号，防止中途手动切了昆仑壳但未走全局重登
+            account_name = await self._get_account_name()
+            bound = self._get_kunlun_bound_account()
+            if account_name and bound and account_name != bound:
+                self._emit_log(
+                    f'昆仑: 同步前发现账号变更（绑定={bound}, 当前={account_name}），重置 Session',
+                    'kunlun',
+                )
+                await self._kunlun.invalidate_session('同步前账号变更')
+                if not await self._kunlun.login():
+                    self._kunlun_last_ok = False
+                    self._emit_status({
+                        'kunlun_status': {
+                            KUNLUN_STATUS_LABEL: {
+                                'ok': False,
+                                'error': '换号重登失败',
+                                'time': now_str,
+                            }
+                        }
+                    })
+                    return
+                self._set_kunlun_bound_account(account_name)
+
             payloads = await self._kunlun.collect()
             if not payloads:
                 self._kunlun_last_ok = False
@@ -1821,7 +1916,10 @@ class BackgroundWorker(threading.Thread):
                 self._emit_combined_sync_status()
                 return
 
-            account_name = await self._get_account_name()
+            if not account_name:
+                account_name = await self._get_account_name()
+            if account_name:
+                self._set_kunlun_bound_account(account_name)
             extra_params = {'isScript': '1', 'accountName': account_name}
             reports = await report_cookies(
                 payloads, emit_log=self._emit_log, log_category='kunlun', extra_params=extra_params
