@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-import os
 import asyncio
+import base64
+import json
+import os
 
 from loguru import logger
 from playwright.async_api import Browser, BrowserContext, Page
@@ -48,6 +50,47 @@ def _is_scan_query_ready_url(url: str) -> bool:
     return False
 
 
+def _accounts_match(expected: str, actual: str) -> bool:
+    """网点管家 userName 与昆仑展示名/token 名模糊对齐。"""
+    a = (expected or '').strip()
+    b = (actual or '').strip()
+    if not a or not b:
+        return False
+    return a == b or a in b or b in a
+
+
+def _decode_jwt_payload(token: str) -> dict:
+    try:
+        parts = (token or '').split('.')
+        if len(parts) < 2:
+            return {}
+        payload = parts[1]
+        payload += '=' * (-len(payload) % 4)
+        raw = base64.urlsafe_b64decode(payload.encode('utf-8'))
+        return json.loads(raw.decode('utf-8'))
+    except Exception:
+        return {}
+
+
+def _name_from_sto_token(token: str) -> str:
+    """从 __stoToken JWT 解析真实姓名 / 用户名。"""
+    data = _decode_jwt_payload(token)
+    userinfo_raw = data.get('USERINFO') or data.get('USER_INFO') or ''
+    info = {}
+    if isinstance(userinfo_raw, str) and userinfo_raw:
+        try:
+            info = json.loads(userinfo_raw)
+        except Exception:
+            info = {}
+    elif isinstance(userinfo_raw, dict):
+        info = userinfo_raw
+    return (
+        (info.get('realName') or info.get('nickName') or info.get('userName') or '')
+        if isinstance(info, dict)
+        else ''
+    )
+
+
 class KunlunSiteDriver:
     name = '昆仑'
 
@@ -63,15 +106,25 @@ class KunlunSiteDriver:
         if restore and os.path.exists(KUNLUN_STORAGE_PATH):
             context_opts['storage_state'] = KUNLUN_STORAGE_PATH
             self._context = await browser.new_context(**context_opts)
-            self._emit_log('昆仑: 恢复已有 Session', 'kunlun')
+            self._emit_log(f'昆仑: 恢复已有 Session → {KUNLUN_STORAGE_PATH}', 'kunlun')
         else:
+            if not restore and os.path.exists(KUNLUN_STORAGE_PATH):
+                # 明确要求不恢复时，落盘一并删掉，避免后续路径又读回来
+                try:
+                    os.remove(KUNLUN_STORAGE_PATH)
+                    self._emit_log(f'昆仑: create_context(restore=False)，已删除 {KUNLUN_STORAGE_PATH}', 'kunlun')
+                except Exception as e:
+                    self._emit_log(f'昆仑: 删除 storage 失败: {e}', 'kunlun')
             self._context = await browser.new_context(**context_opts)
-            self._emit_log('昆仑: 创建新 Context', 'kunlun')
+            self._emit_log('昆仑: 创建新 Context（不恢复 Session）', 'kunlun')
         return self._context
 
     async def invalidate_session(self, reason: str = '') -> None:
         """清空昆仑独立 context 的 cookie / 落盘状态，强制下次走钉钉重登。
-        用于网点管家换号后，避免昆仑继续用旧账号的 storage_state。"""
+
+        关键：只要 storage_state 还在，goto 昆仑会直接进旧号，根本不会走钉钉选新号。
+        用户手动删 storage 才能换号 —— 本方法就是自动化这一步。
+        """
         reason_text = f' ({reason})' if reason else ''
         self._emit_log(f'昆仑: 失效 Session{reason_text}，清理 cookie 与落盘状态', 'kunlun')
         try:
@@ -91,6 +144,8 @@ class KunlunSiteDriver:
             if os.path.exists(KUNLUN_STORAGE_PATH):
                 os.remove(KUNLUN_STORAGE_PATH)
                 self._emit_log(f'昆仑: 已删除 {KUNLUN_STORAGE_PATH}', 'kunlun')
+            else:
+                self._emit_log(f'昆仑: 落盘不存在，无需删除: {KUNLUN_STORAGE_PATH}', 'kunlun')
         except Exception as e:
             self._emit_log(f'昆仑: 删除 storage 失败: {e}', 'kunlun')
 
@@ -145,28 +200,80 @@ class KunlunSiteDriver:
             return False
 
     async def read_displayed_account(self) -> str:
-        """读取昆仑壳上头像展示名（text 属性），用于与网点管家账号对齐校验。"""
+        """读取昆仑当前登录名：优先 JWT __stoToken，其次头像 text。"""
         try:
             await self.ensure_page()
-            avatar = self._page.locator('.shell-ui-user-avatar').first
-            if not await avatar.is_visible(timeout=2000):
-                return ''
-            text = (await avatar.get_attribute('text')) or ''
-            if not text:
-                text = (await avatar.inner_text()) or ''
-            return text.strip()
-        except Exception:
+            # 1) token 最准（与上报同源）
+            token = await self._read_sto_token()
+            name = _name_from_sto_token(token)
+            if name:
+                self._emit_log(f'昆仑: 从 __stoToken 解析到账号名: {name}', 'kunlun')
+                return name
+
+            # 2) 头像兜底
+            name = await self._page.evaluate(
+                """() => {
+                    const sels = [
+                        '.shell-ui-user-avatar',
+                        '.sto-shell-user-avatar',
+                        '.user-info [class*="avatar"]',
+                        '[class*="user-avatar"]',
+                    ];
+                    for (const s of sels) {
+                        const el = document.querySelector(s);
+                        if (!el) continue;
+                        const t = (el.getAttribute('text') || el.textContent || '').trim();
+                        if (t) return t;
+                    }
+                    return '';
+                }"""
+            )
+            name = (name or '').strip()
+            if name:
+                self._emit_log(f'昆仑: 从头像读取到账号名: {name}', 'kunlun')
+            return name
+        except Exception as e:
+            self._emit_log(f'昆仑: 读取展示账号失败: {e}', 'kunlun')
             return ''
 
-    async def login(self) -> bool:
-        """钉钉 SSO 登录（强制选山东临沂集散中心），最多重试 3 次。"""
+    async def identity_matches(self, expected_account: str) -> bool:
+        """当前昆仑登录身份是否与网点管家账号一致。"""
+        if not (expected_account or '').strip():
+            return True
+        actual = await self.read_displayed_account()
+        if not actual:
+            self._emit_log(
+                f'昆仑: 无法读取当前登录名，无法与网点管家「{expected_account}」对齐',
+                'kunlun',
+            )
+            return False
+        ok = _accounts_match(expected_account, actual)
+        if ok:
+            self._emit_log(f'昆仑: 账号对齐通过（期望={expected_account}, 实际={actual}）', 'kunlun')
+        else:
+            self._emit_log(
+                f'昆仑: 账号不对齐（期望={expected_account}, 实际={actual}）',
+                'kunlun',
+            )
+        return ok
+
+    async def login(self, *, force_clean: bool = True) -> bool:
+        """钉钉 SSO 登录（强制选山东临沂集散中心），最多重试 3 次。
+
+        force_clean=True（默认）：登录前先删 storage_state 并重建 context。
+        否则旧 cookie 会让页面直接进旧号，看起来像「登录成功」实则没换号。
+        """
         for attempt in range(3):
             try:
-                self._emit_log(f'昆仑: 开始登录 (第{attempt + 1}次)', 'kunlun')
-                if not self._context:
-                    if not self._browser:
-                        raise RuntimeError('昆仑 Browser 未绑定')
-                    await self.create_context(self._browser, restore=False)
+                self._emit_log(f'昆仑: 开始登录 (第{attempt + 1}次, force_clean={force_clean})', 'kunlun')
+                if not self._browser:
+                    raise RuntimeError('昆仑 Browser 未绑定')
+
+                if force_clean or not self._context:
+                    await self.invalidate_session('login 前强制清 storage')
+                    if not self._context:
+                        await self.create_context(self._browser, restore=False)
+
                 if not self._page or self._page.is_closed():
                     self._page = await self._context.new_page()
 
@@ -194,10 +301,19 @@ class KunlunSiteDriver:
                     raise RuntimeError(f'登录后业务壳未就绪: {self._page.url}')
 
                 await self._context.storage_state(path=KUNLUN_STORAGE_PATH)
-                self._emit_log(f'昆仑: 登录成功，已保存 Session: {self._page.url}', 'kunlun')
+                shown = await self.read_displayed_account()
+                self._emit_log(
+                    f'昆仑: 登录成功，已保存 Session: {self._page.url}，当前账号={shown or "(未读到)"}',
+                    'kunlun',
+                )
                 return True
             except Exception as e:
                 self._emit_log(f'昆仑: 登录失败 (第{attempt + 1}次): {e}', 'kunlun')
+                # 失败也清一次，避免脏 cookie 污染下一轮
+                try:
+                    await self.invalidate_session('登录失败清理')
+                except Exception:
+                    pass
                 if attempt < 2:
                     await asyncio.sleep(10)
         return False
@@ -229,10 +345,7 @@ class KunlunSiteDriver:
         await result.click()
         self._emit_log('昆仑: 已点击搜索结果第一项「扫描查询」', 'kunlun')
 
-        # 落地形态有两种：
-        # 1) shell 内 iframe 面板 div[id="/device/scanQuery"]
-        # 2) 整页跳到 /jiutian/page-info/...title=扫描查询（换号后常见）
-        # 旧逻辑只等面板 → 第 2 种会 20s 超时，collect 根本读不到 token。
+        # 落地形态有两种：iframe 面板 或整页 jiutian/page-info
         panel_ok = False
         try:
             panel = page.locator(KUNLUN_SCAN_PANEL_SELECTOR).first
@@ -253,7 +366,6 @@ class KunlunSiteDriver:
                     break
                 await page.wait_for_timeout(500)
             else:
-                # 最后兜底：直接 goto 入口，再读 token
                 self._emit_log(f'昆仑: URL 未落到扫描查询 ({page.url})，兜底 goto {KUNLUN_URL}', 'kunlun')
                 await page.goto(KUNLUN_URL, wait_until='domcontentloaded', timeout=30000)
 
@@ -263,6 +375,8 @@ class KunlunSiteDriver:
     async def _read_sto_token(self) -> str:
         """在 top 与昆仑相关 frames 中读取 sessionStorage.__stoToken。"""
         page = self._page
+        if not page or page.is_closed():
+            return ''
         script = (
             f"() => {{ try {{ return sessionStorage.getItem('{KUNLUN_SESSION_STORAGE_KEY}') || ''; }} "
             f"catch (e) {{ return ''; }} }}"
@@ -309,9 +423,9 @@ class KunlunSiteDriver:
         return [payload]
 
     async def keep_alive(self) -> bool:
-        """心跳：reload 校验登录态，过期则重登。"""
+        """心跳：reload 校验登录态，过期则重登（会清 storage）。"""
         ok = await self.check_session()
         if ok:
             return True
         self._emit_log('昆仑: 心跳发现 Session 无效，尝试重登', 'kunlun')
-        return await self.login()
+        return await self.login(force_clean=True)

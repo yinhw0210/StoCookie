@@ -1770,34 +1770,46 @@ class BackgroundWorker(threading.Thread):
         settings = _load_settings()
         settings['kunlun_bound_account'] = account_name or ''
         try:
-            with open(SETTINGS_PATH, 'w') as f:
+            with open(SETTINGS_PATH, 'w', encoding='utf-8') as f:
                 json.dump(settings, f, ensure_ascii=False, indent=4)
         except Exception as e:
             self._emit_log(f'昆仑: 写入绑定账号失败: {e}', 'kunlun')
 
+    def _kunlun_account_out_of_sync(self, account_name: str) -> bool:
+        """绑定账号与当前网点管家不一致（含绑定为空）→ 必须丢弃旧 storage。"""
+        if not account_name:
+            return False
+        bound = self._get_kunlun_bound_account()
+        return bound != account_name
+
     async def _reset_kunlun_for_account_change(self, reason: str) -> None:
-        """网点管家换号后：清空昆仑独立 session 并立即重登。"""
+        """网点管家换号后：删掉昆仑 storage_state 并强制干净重登（等同手动删文件）。"""
         from config import KUNLUN_STORAGE_PATH
 
+        # 无论 kunlun 是否已 init，先物理删除落盘，杜绝任何路径再 restore 旧号
+        try:
+            if os.path.exists(KUNLUN_STORAGE_PATH):
+                os.remove(KUNLUN_STORAGE_PATH)
+                self._emit_log(f'昆仑: 已删除落盘 {KUNLUN_STORAGE_PATH} ({reason})', 'kunlun')
+        except Exception as e:
+            self._emit_log(f'昆仑: 删除落盘失败: {e}', 'kunlun')
+        self._set_kunlun_bound_account('')
+
         if not self._kunlun:
-            # 尚未 init：清掉落盘，避免下次 restore 旧号
-            try:
-                if os.path.exists(KUNLUN_STORAGE_PATH):
-                    os.remove(KUNLUN_STORAGE_PATH)
-                    self._emit_log(f'昆仑: 预清理落盘状态 ({reason})', 'kunlun')
-            except Exception as e:
-                self._emit_log(f'昆仑: 预清理落盘失败: {e}', 'kunlun')
-            self._set_kunlun_bound_account('')
             return
         try:
             await self._kunlun.invalidate_session(reason)
-            if await self._kunlun.login():
+            if await self._kunlun.login(force_clean=True):
                 account_name = await self._get_account_name()
+                # 登录后再核验身份，不对齐则再清一次重试
+                if account_name and not await self._kunlun.identity_matches(account_name):
+                    self._emit_log('昆仑: 重登后身份仍不对齐，再次强制清 storage 重登', 'kunlun')
+                    if await self._kunlun.login(force_clean=True):
+                        account_name = await self._get_account_name()
                 self._set_kunlun_bound_account(account_name)
                 self._emit_log(f'昆仑: 换号后重登成功，绑定账号={account_name or "(空)"}', 'kunlun')
             else:
                 self._emit_log('昆仑: 换号后重登失败，后续定时重试', 'kunlun')
-                self._set_kunlun_bound_account('')
         except Exception as e:
             self._emit_log(f'昆仑: 换号重置异常: {e}', 'kunlun')
 
@@ -1821,15 +1833,19 @@ class BackgroundWorker(threading.Thread):
 
         account_name = await self._get_account_name()
         bound = self._get_kunlun_bound_account()
-        account_mismatch = bool(account_name and bound and account_name != bound)
+        # 关键：bound 为空时旧逻辑不触发 mismatch，会 restore 旧号。
+        # 现在 bound != account_name（含 bound=""）一律视为不同步，强制不恢复。
+        account_mismatch = self._kunlun_account_out_of_sync(account_name)
         if account_mismatch:
             self._emit_log(
-                f'昆仑: 绑定账号「{bound}」与当前网点管家「{account_name}」不一致，丢弃旧 Session',
+                f'昆仑: 绑定账号「{bound or "(空)"}」与当前网点管家「{account_name}」不一致，'
+                f'丢弃旧 Session（等同手动删 storage）',
                 'kunlun',
             )
             try:
                 if os.path.exists(KUNLUN_STORAGE_PATH):
                     os.remove(KUNLUN_STORAGE_PATH)
+                    self._emit_log(f'昆仑: 已删除 {KUNLUN_STORAGE_PATH}', 'kunlun')
             except Exception as e:
                 self._emit_log(f'昆仑: 删除旧 Session 失败: {e}', 'kunlun')
 
@@ -1837,21 +1853,31 @@ class BackgroundWorker(threading.Thread):
 
         session_ok = False if account_mismatch else await self._kunlun.check_session()
         if session_ok and account_name:
-            # 绑定字段为空时（升级首跑），用壳上头像名再对一次，避免 restore 旧号
-            displayed = await self._kunlun.read_displayed_account()
-            if displayed and displayed != account_name and account_name not in displayed and displayed not in account_name:
+            # 能读到页面身份则必须对齐；读不到时若 bound 已对齐则信任 Session
+            # （Playwright storage_state 不含 sessionStorage，token 可能暂时读不到）
+            actual = await self._kunlun.read_displayed_account()
+            if actual and not await self._kunlun.identity_matches(account_name):
                 self._emit_log(
-                    f'昆仑: 页面账号「{displayed}」与网点管家「{account_name}」不一致，强制重登',
+                    f'昆仑: Session 有效但身份「{actual}」未对齐网点管家「{account_name}」，强制清 storage 重登',
                     'kunlun',
                 )
-                await self._kunlun.invalidate_session('头像账号不一致')
                 session_ok = False
+            elif not actual:
+                self._emit_log(
+                    f'昆仑: Session 有效但暂未读到身份（bound={bound or "(空)"}），继续使用已恢复 Session',
+                    'kunlun',
+                )
 
         if not session_ok:
-            login_ok = await self._kunlun.login()
+            login_ok = await self._kunlun.login(force_clean=True)
             if not login_ok:
                 self._emit_log('昆仑: 启动登录失败，后续定时重试', 'kunlun')
                 return
+            if account_name and not await self._kunlun.identity_matches(account_name):
+                self._emit_log(
+                    '昆仑: 登录后身份仍未对齐，请确认钉钉当前账号与网点管家一致',
+                    'kunlun',
+                )
 
         if account_name:
             self._set_kunlun_bound_account(account_name)
@@ -1868,7 +1894,7 @@ class BackgroundWorker(threading.Thread):
             session_ok = await self._kunlun.check_session()
             if not session_ok:
                 self._emit_log('昆仑: Session 过期，重新登录', 'kunlun')
-                if not await self._kunlun.login():
+                if not await self._kunlun.login(force_clean=True):
                     self._emit_log('昆仑: 登录失败，本次同步跳过', 'kunlun')
                     self._emit_status({
                         'kunlun_status': {
@@ -1882,16 +1908,29 @@ class BackgroundWorker(threading.Thread):
                     return
 
             now_str = datetime.now().strftime('%H:%M:%S')
-            # 采集前再对一次账号，防止中途手动切了昆仑壳但未走全局重登
             account_name = await self._get_account_name()
-            bound = self._get_kunlun_bound_account()
-            if account_name and bound and account_name != bound:
+            # 绑定不同步 → 强制删 storage 重登（等同手动删文件）
+            # 能读到页面身份且对不齐 → 同样强制重登
+            need_relogin = False
+            if self._kunlun_account_out_of_sync(account_name):
+                bound = self._get_kunlun_bound_account()
                 self._emit_log(
-                    f'昆仑: 同步前发现账号变更（绑定={bound}, 当前={account_name}），重置 Session',
+                    f'昆仑: 同步前账号不同步（绑定={bound or "(空)"}, 当前={account_name}），强制清 storage 重登',
                     'kunlun',
                 )
-                await self._kunlun.invalidate_session('同步前账号变更')
-                if not await self._kunlun.login():
+                need_relogin = True
+            elif account_name:
+                actual = await self._kunlun.read_displayed_account()
+                if actual and not await self._kunlun.identity_matches(account_name):
+                    self._emit_log(
+                        f'昆仑: 同步前身份「{actual}」未对齐「{account_name}」，强制清 storage 重登',
+                        'kunlun',
+                    )
+                    need_relogin = True
+
+            if need_relogin:
+                await self._kunlun.invalidate_session('同步前强制换号')
+                if not await self._kunlun.login(force_clean=True):
                     self._kunlun_last_ok = False
                     self._emit_status({
                         'kunlun_status': {
