@@ -24,14 +24,20 @@ from config import (
 from login import login_via_dingtalk
 
 
-def _is_kunlun_success_url(url: str) -> bool:
+def _is_kunlun_host_url(url: str) -> bool:
+    """是否已回到昆仑域名（含 SSO 回跳 ?code=...）。
+
+    钉钉登录后常停在 https://kunlun.sto.cn/?code=xxx&returnUrl=/ ，
+    SPA 已登录但 URL 仍带 code；此前把带 code 一律判失败，导致
+    「页面已登录却报登录未完成、不走搜索采 cookie」。
+    真正是否可用改由业务壳（搜索按钮）判定。
+    """
     u = url or ''
-    if 'kunlun.sto.cn' not in u or is_auth_url(u):
-        return False
-    # OAuth 回跳未完成：仍停在 ?code=... 不算已进入业务壳
-    if '?code=' in u or '&code=' in u:
-        return False
-    return True
+    return 'kunlun.sto.cn' in u and not is_auth_url(u)
+
+
+def _is_kunlun_success_url(url: str) -> bool:
+    return _is_kunlun_host_url(url)
 
 
 def _is_scan_query_ready_url(url: str) -> bool:
@@ -180,18 +186,26 @@ class KunlunSiteDriver:
             return False
 
     async def check_session(self) -> bool:
-        """reload 检测 session；认证页 / OAuth code 回跳 / 无业务壳 → 过期。"""
+        """reload 检测 session；认证页 / 无业务壳 → 过期。带 ?code= 但壳已就绪仍算有效。"""
         try:
             await self.ensure_page()
             self._emit_log('昆仑: 复用常驻页面检测 Session (reload)', 'kunlun')
             await self._page.reload(wait_until='domcontentloaded', timeout=30000)
             await self._page.wait_for_timeout(3000)
             url = self._page.url
-            if not _is_kunlun_success_url(url):
+            if not _is_kunlun_host_url(url):
                 self._emit_log(f'昆仑: Session 过期或未进入昆仑: {url}', 'kunlun')
                 return False
             if not await self._shell_ready():
-                self._emit_log(f'昆仑: Session URL 有效但业务壳未就绪: {url}', 'kunlun')
+                # 停在 ?code= 且壳未出：尝试进目标页再判一次
+                if '?code=' in url or '&code=' in url:
+                    self._emit_log(f'昆仑: 停在 SSO code 回跳且壳未就绪，goto 目标页重试: {url}', 'kunlun')
+                    await self._page.goto(KUNLUN_URL, wait_until='domcontentloaded', timeout=30000)
+                    await self._page.wait_for_timeout(3000)
+                    if await self._shell_ready():
+                        self._emit_log(f'昆仑: Session 有效（code 回跳后壳已就绪）: {self._page.url}', 'kunlun')
+                        return True
+                self._emit_log(f'昆仑: Session URL 在昆仑但业务壳未就绪: {self._page.url}', 'kunlun')
                 return False
             self._emit_log(f'昆仑: Session 有效，当前 URL: {url}', 'kunlun')
             return True
@@ -277,28 +291,70 @@ class KunlunSiteDriver:
                 if not self._page or self._page.is_closed():
                     self._page = await self._context.new_page()
 
-                await login_via_dingtalk(
-                    self._page,
-                    entry_url=KUNLUN_URL,
-                    is_success_url=_is_kunlun_success_url,
-                    preferred_org=KUNLUN_ORG,
-                    site_label='昆仑',
-                )
+                try:
+                    await login_via_dingtalk(
+                        self._page,
+                        entry_url=KUNLUN_URL,
+                        is_success_url=_is_kunlun_success_url,
+                        preferred_org=KUNLUN_ORG,
+                        site_label='昆仑',
+                    )
+                except Exception as e:
+                    # 钉钉流程可能因 URL 仍带 ?code= 抛错，但页面其实已进昆仑
+                    if not _is_kunlun_host_url(self._page.url):
+                        raise
+                    self._emit_log(
+                        f'昆仑: 钉钉等待抛错但已在昆仑域名，继续等业务壳: {e} | {self._page.url}',
+                        'kunlun',
+                    )
 
-                if not _is_kunlun_success_url(self._page.url):
+                if not _is_kunlun_host_url(self._page.url):
                     await self._page.goto(KUNLUN_URL, wait_until='domcontentloaded', timeout=30000)
                     await self._page.wait_for_timeout(3000)
 
-                if not _is_kunlun_success_url(self._page.url):
+                if not _is_kunlun_host_url(self._page.url):
                     raise RuntimeError(f'登录后仍未进入昆仑: {self._page.url}')
 
-                # 等业务壳（搜索）出现，避免停在半登录态
-                for _ in range(10):
+                # SSO 回跳常停在 ?code=...；以搜索按钮为准，最多等 30s
+                shell_ok = False
+                for i in range(30):
                     if await self._shell_ready():
+                        shell_ok = True
+                        self._emit_log(
+                            f'昆仑: 业务壳已就绪 (第{i + 1}s): {self._page.url}',
+                            'kunlun',
+                        )
                         break
                     await self._page.wait_for_timeout(1000)
-                else:
+
+                if not shell_ok:
+                    # 带 code 的首页有时壳晚加载：强制进扫描查询再等
+                    self._emit_log(
+                        f'昆仑: 业务壳未就绪，goto 扫描查询再等: {self._page.url}',
+                        'kunlun',
+                    )
+                    await self._page.goto(KUNLUN_URL, wait_until='domcontentloaded', timeout=30000)
+                    await self._page.wait_for_timeout(2000)
+                    for i in range(20):
+                        if await self._shell_ready():
+                            shell_ok = True
+                            self._emit_log(
+                                f'昆仑: goto 后业务壳就绪 (第{i + 1}s): {self._page.url}',
+                                'kunlun',
+                            )
+                            break
+                        await self._page.wait_for_timeout(1000)
+
+                if not shell_ok:
                     raise RuntimeError(f'登录后业务壳未就绪: {self._page.url}')
+
+                # 尽量落到扫描查询入口，方便后续采集（清掉 ?code= 噪音 URL）
+                if 'scanQuery' not in (self._page.url or ''):
+                    try:
+                        await self._page.goto(KUNLUN_URL, wait_until='domcontentloaded', timeout=30000)
+                        await self._page.wait_for_timeout(2000)
+                    except Exception as e:
+                        self._emit_log(f'昆仑: 登录后导航扫描查询失败（忽略）: {e}', 'kunlun')
 
                 await self._context.storage_state(path=KUNLUN_STORAGE_PATH)
                 shown = await self.read_displayed_account()
@@ -323,7 +379,12 @@ class KunlunSiteDriver:
         await self.ensure_page()
         page = self._page
 
-        if not _is_kunlun_success_url(page.url) or not await self._shell_ready():
+        if not _is_kunlun_host_url(page.url) or not await self._shell_ready():
+            await page.goto(KUNLUN_URL, wait_until='domcontentloaded', timeout=30000)
+            await page.wait_for_timeout(2000)
+        elif '?code=' in page.url or '&code=' in page.url:
+            # 已登录但 URL 仍带 code：先落到扫描查询再搜
+            self._emit_log(f'昆仑: 当前停在 code 回跳页，先 goto 扫描查询: {page.url}', 'kunlun')
             await page.goto(KUNLUN_URL, wait_until='domcontentloaded', timeout=30000)
             await page.wait_for_timeout(2000)
 
