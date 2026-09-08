@@ -1,25 +1,19 @@
-import os
-import sys
-
 from PySide6.QtWidgets import QSystemTrayIcon, QMenu
 from PySide6.QtGui import QIcon, QAction
 from PySide6.QtCore import QCoreApplication, Slot
 
-# PyInstaller frozen 模式下，资源被收集到 _internal/ 目录；
-# 非冻结模式（开发时）资源在项目根 gui/resources/ 下。
-if getattr(sys, 'frozen', False):
-    _ICON_DIR = os.path.join(os.path.dirname(sys.executable), '_internal', 'gui', 'resources')
-else:
-    _ICON_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'gui', 'resources')
-_ICON_PATH = os.path.join(_ICON_DIR, 'icon.ico')
+from config import RESOURCE_DIR, INSTALL_DIR
+import os
 
 
 class TrayIcon(QSystemTrayIcon):
     def __init__(self, window, worker, parent=None):
-        if os.path.exists(_ICON_PATH):
-            icon = QIcon(_ICON_PATH)
-        else:
-            icon = QIcon()
+        icon_candidates = [
+            os.path.join(RESOURCE_DIR, 'gui', 'resources', 'icon.ico'),
+            os.path.join(INSTALL_DIR, 'gui', 'resources', 'icon.ico'),
+        ]
+        icon_path = next((p for p in icon_candidates if os.path.exists(p)), '')
+        icon = QIcon(icon_path) if icon_path else QIcon()
         super().__init__(icon, parent)
 
         self._window = window

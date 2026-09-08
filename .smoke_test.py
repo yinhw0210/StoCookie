@@ -48,6 +48,18 @@ class FakeWorker:
     def resume(self):
         pass
 
+    def update_intervals(self, collect_min, heartbeat_min):
+        pass
+
+    def update_zc_settings(self, enabled, interval_min):
+        pass
+
+    def update_kunlun_settings(self, enabled, heartbeat_min):
+        pass
+
+    def update_pdd_settings(self, enabled, account, password):
+        pass
+
 
 # 3) 构造并测试
 from PySide6.QtWidgets import QApplication
@@ -87,6 +99,13 @@ w._tick()
 # 测试暂停态 UI 驱动
 w.set_paused_ui(True)
 w.set_paused_ui(False)
+
+# 设置弹窗必须能构造（打包后点不开的回归）
+from gui.settings_dialog import SettingsDialog
+dlg = SettingsDialog(60, 30, w._worker, parent=w)
+dlg.show()
+app.processEvents()
+dlg.close()
 
 # 测试日志面板 add（彩色行 + 各级别）
 for msg in ('[成功] 登录完成 ✓', '[警告] 跳过本轮 ⚠', '[错误] 请求超时 ✗', '[信息] 心跳正常'):

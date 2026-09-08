@@ -1,5 +1,4 @@
 import asyncio
-import json
 import os
 import threading
 import time
@@ -16,11 +15,14 @@ from config import (
     KUNLUN_HEARTBEAT_MINUTES,
     KUNLUN_STATUS_LABEL,
     LOG_DIR,
+    PDD_STORAGE_PATH,
     PERSISTENT_PAGES,
-    SETTINGS_PATH,
     SSO_URL,
     STORAGE_DIR,
     WANGDIAN_ANNOUNCEMENT_CLOSE_SELECTOR,
+    load_settings,
+    pdd_session_should_reset,
+    save_settings,
     WANGDIAN_INDEX_URL,
     WANGDIAN_MAP_AREA_DETAIL_URL_MARKER,
     WANGDIAN_NAV_SELECTOR,
@@ -95,16 +97,6 @@ COOKIE_REPORT_LABELS = {
 ZC_STATUS_LABEL = 'engineSid (客户经营分析)'
 
 
-def _load_settings() -> dict:
-    if os.path.exists(SETTINGS_PATH):
-        try:
-            with open(SETTINGS_PATH, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-
 class WorkerSignals(QObject):
     log_message = Signal(str, str)  # (message, category)
     status_update = Signal(dict)
@@ -124,6 +116,7 @@ class BackgroundWorker(threading.Thread):
         self._response_listener_registered = False
         self._persistent_pages: dict[str, object] = {}
         self._pdd = None
+        self._browser = None
         self._kunlun = None
         self._known_spf_sid_values: set[str] = set()
         self._wangdian_search_lock = None
@@ -149,7 +142,7 @@ class BackgroundWorker(threading.Thread):
         # 探测协程在 False 时空转等待，不搜索、不触发重登
         self._session_ready = False
 
-        settings = _load_settings()
+        settings = load_settings()
         # 从持久化恢复已知 spf_sid 值（用于跨重启检测值变化）
         saved = settings.get('known_spf_sid_values', [])
         if saved:
@@ -188,6 +181,8 @@ class BackgroundWorker(threading.Thread):
     def run(self):
         os.makedirs(STORAGE_DIR, exist_ok=True)
         os.makedirs(LOG_DIR, exist_ok=True)
+        from config import SETTINGS_PATH
+        self._emit_log(f'配置文件: {SETTINGS_PATH}', 'general')
 
         if os.path.isdir(BROWSERS_DIR):
             os.environ['PLAYWRIGHT_BROWSERS_PATH'] = BROWSERS_DIR
@@ -221,6 +216,7 @@ class BackgroundWorker(threading.Thread):
             # 两个 _do_login 并发会互相 clear_cookies，导致登录全部失败
             self._login_lock = asyncio.Lock()
 
+            self._browser = browser
             self._register_wangdian_trigger(context)
 
             login_ok = await self._ensure_logged_in(context, 'startup')
@@ -1444,10 +1440,7 @@ class BackgroundWorker(threading.Thread):
     def _persist_known_spf_sid_values(self):
         """将已知 spf_sid 值写入 settings.json，用于跨重启检测值变化。"""
         try:
-            settings = _load_settings()
-            settings['known_spf_sid_values'] = sorted(self._known_spf_sid_values)
-            with open(SETTINGS_PATH, 'w', encoding='utf-8') as f:
-                json.dump(settings, f, ensure_ascii=False, indent=4)
+            save_settings({'known_spf_sid_values': sorted(self._known_spf_sid_values)})
         except Exception:
             pass
 
@@ -1658,7 +1651,7 @@ class BackgroundWorker(threading.Thread):
 
     async def _init_pdd(self, browser):
         """初始化 PDD 站点（独立 context）"""
-        settings = _load_settings()
+        settings = load_settings()
         pdd_enabled = settings.get('pdd_enabled', False)
         pdd_account = settings.get('pdd_account', '')
         pdd_password = settings.get('pdd_password', '')
@@ -1761,17 +1754,58 @@ class BackgroundWorker(threading.Thread):
                 waited += 5
         self._emit_log('PDD: 独立协程退出', 'pdd')
 
+    async def _stop_pdd_task(self):
+        task = self._pdd_task
+        self._pdd_task = None
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _apply_pdd_settings(self, enabled: bool, account: str, password: str):
+        """按最新配置重建 PDD 站点：账号密码变化时丢弃旧 Session 并重新登录。"""
+        old_account = getattr(self._pdd, '_account', '') if self._pdd else ''
+        old_password = getattr(self._pdd, '_password', '') if self._pdd else ''
+        reset_session = pdd_session_should_reset(old_account, old_password, account, password)
+
+        if self._pdd and enabled and account and not reset_session:
+            self._emit_log('PDD: 账号未变化，继续使用当前 Session', 'pdd')
+            return
+
+        await self._stop_pdd_task()
+        if self._pdd:
+            await self._pdd.close()
+            self._pdd = None
+
+        if reset_session and os.path.exists(PDD_STORAGE_PATH):
+            try:
+                os.remove(PDD_STORAGE_PATH)
+                self._emit_log('PDD: 账号或密码已变更，已清除旧 Session', 'pdd')
+            except OSError as e:
+                self._emit_log(f'PDD: 清除旧 Session 失败: {e}', 'pdd')
+
+        if not enabled or not account:
+            self._emit_log('PDD: 已停用或未配置账号', 'pdd')
+            return
+
+        if not self._browser:
+            self._emit_log('PDD: 浏览器尚未就绪，配置已保存，启动完成后生效', 'pdd')
+            return
+
+        await self._init_pdd(self._browser)
+        if self._pdd:
+            self._pdd_task = asyncio.create_task(self._probe_pdd_loop())
+
     # ========== 昆仑站点方法 ==========
 
     def _get_kunlun_bound_account(self) -> str:
-        return str(_load_settings().get('kunlun_bound_account', '') or '')
+        return str(load_settings().get('kunlun_bound_account', '') or '')
 
     def _set_kunlun_bound_account(self, account_name: str) -> None:
-        settings = _load_settings()
-        settings['kunlun_bound_account'] = account_name or ''
         try:
-            with open(SETTINGS_PATH, 'w', encoding='utf-8') as f:
-                json.dump(settings, f, ensure_ascii=False, indent=4)
+            save_settings({'kunlun_bound_account': account_name or ''})
         except Exception as e:
             self._emit_log(f'昆仑: 写入绑定账号失败: {e}', 'kunlun')
 
@@ -1815,7 +1849,7 @@ class BackgroundWorker(threading.Thread):
 
     async def _init_kunlun(self, browser):
         """初始化昆仑站点（独立 context，钉钉 SSO）"""
-        settings = _load_settings()
+        settings = load_settings()
         kunlun_enabled = settings.get('kunlun_enabled', True)
         self._kunlun_heartbeat_interval = settings.get(
             'kunlun_heartbeat_interval', KUNLUN_HEARTBEAT_MINUTES
@@ -2083,6 +2117,15 @@ class BackgroundWorker(threading.Thread):
         self._emit_log(
             f'昆仑设置已更新: 启用={enabled}(重启生效), 心跳间隔={heartbeat_min}分钟',
             'general',
+        )
+
+    def update_pdd_settings(self, enabled: bool, account: str, password: str):
+        if not self._loop or not self._loop.is_running():
+            self._emit_log('PDD: 配置已保存，将在启动完成后生效', 'pdd')
+            return
+        asyncio.run_coroutine_threadsafe(
+            self._apply_pdd_settings(enabled, account, password),
+            self._loop,
         )
 
     def stop(self):

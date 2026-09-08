@@ -17,6 +17,9 @@ UninstallDisplayIcon={app}\StoCookie.exe
 Source: "dist\StoCookie\*"; DestDir: "{app}"; Flags: recursesubdirs
 
 [Dirs]
+Name: "{userappdata}\StoCookie"
+Name: "{userappdata}\StoCookie\storage"
+Name: "{userappdata}\StoCookie\logs"
 Name: "{app}\storage"
 Name: "{app}\logs"
 

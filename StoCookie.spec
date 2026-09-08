@@ -11,6 +11,7 @@ a = Analysis(
     datas=[
         (driver_dir, 'playwright/driver'),
         ('gui/resources', 'gui/resources'),
+        ('settings.json', '.'),
     ],
     hiddenimports=[
         'pywinauto',
@@ -22,6 +23,10 @@ a = Analysis(
         'PySide6.QtWidgets',
         'PySide6.QtCore',
         'PySide6.QtGui',
+        'gui.settings_dialog',
+        'gui.tray_icon',
+        'sites.pdd',
+        'sites.kunlun',
     ],
     hookspath=[],
     hooksconfig={},
