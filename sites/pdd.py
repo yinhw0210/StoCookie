@@ -182,6 +182,22 @@ class PddSiteDriver:
 
         return payloads
 
+    async def close(self):
+        page = self._page
+        context = self._context
+        self._page = None
+        self._context = None
+        if page and not page.is_closed():
+            try:
+                await page.close()
+            except Exception:
+                pass
+        if context:
+            try:
+                await context.close()
+            except Exception:
+                pass
+
     async def keep_alive(self) -> bool:
         """心跳：reload 目标页面，检查是否仍在登录态。"""
         return await self.check_session()

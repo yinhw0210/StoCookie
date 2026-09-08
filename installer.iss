@@ -19,6 +19,9 @@ Source: "dist\StoCookie\*"; DestDir: "{app}"; Flags: recursesubdirs
 Source: "browsers\*"; DestDir: "{app}\browsers"; Flags: recursesubdirs
 
 [Dirs]
+Name: "{userappdata}\StoCookie"
+Name: "{userappdata}\StoCookie\storage"
+Name: "{userappdata}\StoCookie\logs"
 Name: "{app}\storage"
 Name: "{app}\logs"
 

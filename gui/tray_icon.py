@@ -2,17 +2,18 @@ from PySide6.QtWidgets import QSystemTrayIcon, QMenu
 from PySide6.QtGui import QIcon, QAction
 from PySide6.QtCore import QCoreApplication, Slot
 
-from config import BASE_DIR
+from config import RESOURCE_DIR, INSTALL_DIR
 import os
 
 
 class TrayIcon(QSystemTrayIcon):
     def __init__(self, window, worker, parent=None):
-        icon_path = os.path.join(BASE_DIR, 'gui', 'resources', 'icon.ico')
-        if os.path.exists(icon_path):
-            icon = QIcon(icon_path)
-        else:
-            icon = QIcon()
+        icon_candidates = [
+            os.path.join(RESOURCE_DIR, 'gui', 'resources', 'icon.ico'),
+            os.path.join(INSTALL_DIR, 'gui', 'resources', 'icon.ico'),
+        ]
+        icon_path = next((p for p in icon_candidates if os.path.exists(p)), '')
+        icon = QIcon(icon_path) if icon_path else QIcon()
         super().__init__(icon, parent)
 
         self._window = window

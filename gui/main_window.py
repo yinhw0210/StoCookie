@@ -235,14 +235,20 @@ class MainWindow(QMainWindow):
         self._refresh_pill()
 
     def _open_settings(self):
-        from gui.settings_dialog import SettingsDialog
-        dlg = SettingsDialog(
-            self._worker.collect_interval,
-            self._worker.heartbeat_interval,
-            self._worker,
-            parent=self,
-        )
-        dlg.exec()
+        try:
+            from gui.settings_dialog import SettingsDialog
+            dlg = SettingsDialog(
+                self._worker.collect_interval,
+                self._worker.heartbeat_interval,
+                self._worker,
+                parent=self,
+            )
+            dlg.raise_()
+            dlg.activateWindow()
+            dlg.exec()
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, '设置无法打开', f'打开设置失败：\n{e}')
 
     # ----------------------------------------------------------------- 状态
     @Slot(dict)

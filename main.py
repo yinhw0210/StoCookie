@@ -4,7 +4,7 @@ import os
 from PySide6.QtWidgets import QApplication
 from loguru import logger
 
-from config import LOG_DIR
+from config import LOG_DIR, SETTINGS_PATH, ensure_data_dirs
 from worker import BackgroundWorker
 from gui.main_window import MainWindow
 from gui.tray_icon import TrayIcon
@@ -19,6 +19,7 @@ class QtLogSink:
 
 
 def main():
+    ensure_data_dirs()
     os.makedirs(LOG_DIR, exist_ok=True)
 
     logger.remove()
@@ -31,6 +32,8 @@ def main():
         # encoding 显式指定 utf-8，避免某些平台默认编码导致写入失败。
         enqueue=True, encoding='utf-8',
     )
+
+    logger.info(f'配置文件: {SETTINGS_PATH}')
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)

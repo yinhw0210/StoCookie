@@ -36,10 +36,15 @@ test_*.txt
 .DS_Store
 Thumbs.db
 
-# Distribution
+# Distribution / packaging
 dist/
 build/
 *.egg-info/
+.pyinstaller-cache/
+browsers/
+Output/
+StoCookie_Setup.exe
+*.spec.bak
 
 # WorkBuddy agent data (local tool state, not project code)
 .workbuddy/

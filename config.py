@@ -1,15 +1,114 @@
+import json
 import os
+import shutil
 import sys
 
-if getattr(sys, 'frozen', False):
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-STORAGE_DIR = os.path.join(BASE_DIR, 'storage')
-LOG_DIR = os.path.join(BASE_DIR, 'logs')
-BROWSERS_DIR = os.path.join(BASE_DIR, 'browsers')
-SETTINGS_PATH = os.path.join(BASE_DIR, 'settings.json')
+def resolve_install_dir(frozen=None, executable=None, source_file=None) -> str:
+    """安装/可执行文件所在目录（打包后只读资源旁）。"""
+    is_frozen = getattr(sys, 'frozen', False) if frozen is None else frozen
+    if is_frozen:
+        return os.path.dirname(executable or sys.executable)
+    return os.path.dirname(os.path.abspath(source_file or __file__))
+
+
+def resolve_resource_dir(frozen=None, meipass=None, source_file=None) -> str:
+    """PyInstaller 解包目录（_internal / _MEIPASS），开发态等于源码目录。"""
+    is_frozen = getattr(sys, 'frozen', False) if frozen is None else frozen
+    if is_frozen:
+        return meipass or getattr(sys, '_MEIPASS', resolve_install_dir(frozen=True))
+    return os.path.dirname(os.path.abspath(source_file or __file__))
+
+
+def resolve_data_dir(
+    frozen=None,
+    platform=None,
+    appdata=None,
+    home=None,
+    source_file=None,
+) -> str:
+    """用户可写数据目录。打包后不再写安装目录，避免 Program Files 无权限。"""
+    is_frozen = getattr(sys, 'frozen', False) if frozen is None else frozen
+    if not is_frozen:
+        return os.path.dirname(os.path.abspath(source_file or __file__))
+    plat = sys.platform if platform is None else platform
+    if plat == 'win32':
+        root = appdata or os.environ.get('APPDATA') or os.path.expanduser('~')
+        return os.path.join(root, 'StoCookie')
+    user_home = home or os.path.expanduser('~')
+    if plat == 'darwin':
+        return os.path.join(user_home, 'Library', 'Application Support', 'StoCookie')
+    return os.path.join(user_home, '.stocookie')
+
+
+def load_settings(path=None) -> dict:
+    target = path or SETTINGS_PATH
+    if not os.path.exists(target):
+        return {}
+    try:
+        with open(target, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_settings(updates: dict, path=None) -> dict:
+    """合并写入 settings.json（UTF-8）。返回合并后的完整配置。"""
+    target = path or SETTINGS_PATH
+    parent = os.path.dirname(target)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    settings = load_settings(path=target)
+    settings.update(updates)
+    tmp = target + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(settings, f, ensure_ascii=False, indent=4)
+    os.replace(tmp, target)
+    return settings
+
+
+def seed_settings_file(dest_path=None, bundled_paths=None) -> bool:
+    """首次运行时把随包默认配置拷到用户目录。已存在则不覆盖。"""
+    dest = dest_path or SETTINGS_PATH
+    if os.path.exists(dest):
+        return False
+    candidates = bundled_paths
+    if candidates is None:
+        candidates = [
+            os.path.join(INSTALL_DIR, 'settings.json'),
+            os.path.join(RESOURCE_DIR, 'settings.json'),
+        ]
+    for src in candidates:
+        if src and os.path.isfile(src):
+            parent = os.path.dirname(dest)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            shutil.copy2(src, dest)
+            return True
+    return False
+
+
+def pdd_session_should_reset(old_account: str, old_password: str, new_account: str, new_password: str) -> bool:
+    return (old_account or '') != (new_account or '') or (old_password or '') != (new_password or '')
+
+
+def ensure_data_dirs() -> None:
+    os.makedirs(STORAGE_DIR, exist_ok=True)
+    os.makedirs(LOG_DIR, exist_ok=True)
+    seed_settings_file()
+
+
+INSTALL_DIR = resolve_install_dir()
+RESOURCE_DIR = resolve_resource_dir()
+DATA_DIR = resolve_data_dir()
+# 兼容旧代码：BASE_DIR 指向可写数据目录（settings / logs / storage）
+BASE_DIR = DATA_DIR
+
+STORAGE_DIR = os.path.join(DATA_DIR, 'storage')
+LOG_DIR = os.path.join(DATA_DIR, 'logs')
+SETTINGS_PATH = os.path.join(DATA_DIR, 'settings.json')
+BROWSERS_DIR = os.path.join(INSTALL_DIR, 'browsers')
 
 PERSISTENT_PAGES = [
     # TODO: 实操中心暂不需要（TOKEN 由订单查询页产生），需要时恢复：
