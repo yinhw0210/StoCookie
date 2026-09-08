@@ -13,10 +13,8 @@ SetupIconFile=gui\resources\icon.ico
 UninstallDisplayIcon={app}\StoCookie.exe
 
 [Files]
-; PyInstaller 打包输出
+; PyInstaller 打包输出（已包含 browsers/、_internal/、settings.json 等）
 Source: "dist\StoCookie\*"; DestDir: "{app}"; Flags: recursesubdirs
-; Chromium 浏览器
-Source: "browsers\*"; DestDir: "{app}\browsers"; Flags: recursesubdirs
 
 [Dirs]
 Name: "{app}\storage"

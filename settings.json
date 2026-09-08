@@ -12,6 +12,8 @@
     "_proactive_refresh_disabled": "TODO: restore after spf_sid probe coroutine is stable",
     "proactive_refresh": [],
     "known_spf_sid_values": [
-        "186b1438-c094-4e1c-8f3b-d80f1fcbf01c"
-    ]
+        "935e03fa-40d8-4e26-9fe4-2f1bcce0493f",
+        "c06ef56c-3dba-49a3-9eaf-fbae949be8f4"
+    ],
+    "kunlun_bound_account": "李自富"
 }

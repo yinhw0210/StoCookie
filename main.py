@@ -22,7 +22,10 @@ def main():
     os.makedirs(LOG_DIR, exist_ok=True)
 
     logger.remove()
-    logger.add(sys.stderr, level='INFO', diagnose=False, backtrace=False)
+    # PyInstaller 以 console=False（runw.exe）打包时 sys.stderr 为 None，
+    # 此时跳过控制台 sink，仅保留文件日志即可。
+    if sys.stderr is not None:
+        logger.add(sys.stderr, level='INFO', diagnose=False, backtrace=False)
     logger.add(
         os.path.join(LOG_DIR, 'stocookie-{time:YYYY-MM-DD}.log'),
         rotation='00:00', retention='30 days', level='DEBUG',
